@@ -733,106 +733,106 @@ function filterStage(id,s){
 }
 
 /* ══════════════════════════════════════════
-   EXCEL EXPORT
+   EXCEL EXPORT  (SheetJS — genuine .xlsx)
    ══════════════════════════════════════════ */
-function esc2(s){
-  let v=String(s==null?'':s);
-  // Prefix formula-injection chars so Excel treats as text
-  if(/^[=+\-@\t\r]/.test(v)) v="'"+v;
-  return v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
 function stageLabel(id){ const s=STAGES.find(x=>x.id===id); return s?id+'. '+s.label:'Stage '+id; }
-function xlTable(heading,heads,rows){
-  let t='<h3 style="color:#1a1a2e;margin:18px 0 6px">'+esc2(heading)+'</h3><table border="1" style="border-collapse:collapse">';
-  t+='<tr>'+heads.map(h=>'<th style="background:#1a1a2e;color:#fff;padding:6px 10px;white-space:nowrap">'+esc2(h)+'</th>').join('')+'</tr>';
-  rows.forEach(row=>{
-    t+='<tr>'+row.map(c=>'<td style="padding:5px 9px;border:1px solid #ddd">'+esc2(c)+'</td>').join('')+'</tr>';
-  });
-  return t+'</table>';
+
+/* Load SheetJS from CDN on first use, then run callback */
+function withXLSX(cb){
+  if(window.XLSX){ cb(window.XLSX); return; }
+  const s=document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  s.onload=()=>cb(window.XLSX);
+  s.onerror=()=>toast('Could not load Excel library. Check connection.',true);
+  document.head.appendChild(s);
 }
+
+/* Build a styled worksheet from headers + rows */
+function makeSheet(XLSX, heads, rows){
+  const data=[heads,...rows];
+  const ws=XLSX.utils.aoa_to_sheet(data);
+  // Column widths — auto-size to longest value in each column
+  const colWidths=heads.map((h,ci)=>{
+    const max=data.reduce((m,r)=>Math.max(m,String(r[ci]||'').length),0);
+    return {wch:Math.min(Math.max(max,h.length)+2, 60)};
+  });
+  ws['!cols']=colWidths;
+  return ws;
+}
+
+/* Helper: sort pipeline by stage desc, then cost desc */
+function sortedPipeline(arr){
+  return [...arr].sort((a,b)=>{
+    const d=(b.stage||0)-(a.stage||0);
+    return d!==0?d:(parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
+  });
+}
+/* Helper: sort efiles by status proximity to completion desc, then cost desc */
+function sortedEfiles(arr){
+  const rank={'MoU executed':7,'Approved':6,'Processed':5,'Ready':4,'Finance query':3,'In progress':2,'On hold':1};
+  return [...arr].sort((a,b)=>{
+    const d=(rank[b.status]||0)-(rank[a.status]||0);
+    return d!==0?d:(parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
+  });
+}
+function officerLabel(code){
+  const o=OFFICERS.find(x=>x.code===code);
+  return o?o.name+' ('+o.code+')':code||'Unassigned';
+}
+
+/* ── Officer-wise export (one sheet per officer or two sheets: Pipeline + Efiles) ── */
 function exportOfficerXLSX(code){
   const officer=OFFICERS.find(o=>o.code===code);
   const label=officer?officer.name:code;
-  const {pipeline,efiles}=getOP(code);
-  const pHead=['Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
-  const eHead=['Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
-  const pRows=pipeline.map(p=>[p.project,p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',
-    stageLabel(p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||'']);
-  const eRows=efiles.map(e=>[e.project,e.agency||'',e.ref||'',e.cost||'',
-    e.efileNo||'',e.status||'',e.remark||'']);
-  const html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'+
-    '<head><meta charset="UTF-8"><style>body{font-family:Calibri,Arial,sans-serif;font-size:12px}</style></head><body>'+
-    '<h2 style="color:#1a1a2e">CCL CSR Monitor &mdash; '+esc2(label)+' ('+esc2(code)+') &mdash; FY 2026-27</h2>'+
-    '<p style="color:#666">Exported: '+new Date().toLocaleString('en-IN')+'</p>'+
-    (pipeline.length?xlTable('Pipeline Proposals',pHead,pRows):'<p>No pipeline proposals.</p>')+
-    (efiles.length?'<br>'+xlTable('E-Files',eHead,eRows):'<br><p>No e-files.</p>')+
-    '</body></html>';
-  const blob=new Blob([html],{type:'application/vnd.ms-excel;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url; a.download='CCL_CSR_'+code+'_'+new Date().toISOString().slice(0,10)+'.xls'; a.click();
-  URL.revokeObjectURL(url);
-  toast('Excel downloaded for '+label);
+  withXLSX(XLSX=>{
+    const {pipeline,efiles}=getOP(code);
+    const wb=XLSX.utils.book_new();
+
+    const pHead=['Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
+    const pRows=sortedPipeline(pipeline).map(p=>[
+      p.project||'',p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',
+      stageLabel(p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||''
+    ]);
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,pHead,pRows), 'Pipeline');
+
+    const eHead=['Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
+    const eRows=sortedEfiles(efiles).map(e=>[
+      e.project||'',e.agency||'',e.ref||'',e.cost||'',
+      e.efileNo||'',e.status||'',e.remark||''
+    ]);
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,eHead,eRows), 'E-Files');
+
+    XLSX.writeFile(wb,'CCL_CSR_'+code+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel downloaded for '+label);
+  });
 }
+
+/* ── All-officers summary export (two sheets: Pipeline + E-Files) ── */
 function exportAllXLSX(){
-  // Helper: sort by stage descending, then cost descending
-  function sortPipeline(arr){
-    return [...arr].sort((a,b)=>{
-      const stageDiff=(b.stage||0)-(a.stage||0);
-      if(stageDiff!==0) return stageDiff;
-      return (parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
-    });
-  }
-  function sortEfiles(arr){
-    // E-files: sort by status priority (closer to done = higher) then cost desc
-    const statusRank={'MoU executed':7,'Approved':6,'Processed':5,'Ready':4,'Finance query':3,'In progress':2,'On hold':1};
-    return [...arr].sort((a,b)=>{
-      const rankDiff=(statusRank[b.status]||0)-(statusRank[a.status]||0);
-      if(rankDiff!==0) return rankDiff;
-      return (parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
-    });
-  }
-  function officerLabel(code){
-    const o=OFFICERS.find(x=>x.code===code);
-    return o?o.name+' ('+o.code+')':code||'Unassigned';
-  }
+  withXLSX(XLSX=>{
+    const wb=XLSX.utils.book_new();
 
-  // Build flat sorted Pipeline rows (all officers combined)
-  const allPipeline = sortPipeline(DB.pipeline);
-  const pHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
-  const pRows=allPipeline.map(p=>[
-    officerLabel(p.officer),
-    p.project||'', p.agency||'', p.ref||'',
-    p.cost||'', p.apFlag||'',
-    stageLabel(p.stage), p.stageNote||'',
-    p.hold?'Yes':'No', p.remark||''
-  ]);
+    // Sheet 1: Pipeline — all officers, sorted stage desc → cost desc
+    const pHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
+    const pRows=sortedPipeline(DB.pipeline).map(p=>[
+      officerLabel(p.officer),
+      p.project||'',p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',
+      stageLabel(p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||''
+    ]);
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,pHead,pRows), 'Pipeline');
 
-  // Build flat sorted E-File rows (all officers combined)
-  const allEfiles = sortEfiles(DB.efiles);
-  const eHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
-  const eRows=allEfiles.map(e=>[
-    officerLabel(e.officer),
-    e.project||'', e.agency||'', e.ref||'',
-    e.cost||'', e.efileNo||'',
-    e.status||'', e.remark||''
-  ]);
+    // Sheet 2: E-Files — all officers, sorted status-rank desc → cost desc
+    const eHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
+    const eRows=sortedEfiles(DB.efiles).map(e=>[
+      officerLabel(e.officer),
+      e.project||'',e.agency||'',e.ref||'',e.cost||'',
+      e.efileNo||'',e.status||'',e.remark||''
+    ]);
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,eHead,eRows), 'E-Files');
 
-  const html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'+
-    '<head><meta charset="UTF-8"><style>body{font-family:Calibri,Arial,sans-serif;font-size:12px}</style></head><body>'+
-    '<h1 style="color:#1a1a2e">CCL CSR Monitor &mdash; All Officers &mdash; FY 2026-27</h1>'+
-    '<p style="color:#666">Exported: '+new Date().toLocaleString('en-IN')+
-    ' &nbsp;&bull;&nbsp; Sorted: Stage (high&rarr;low), then Cost (high&rarr;low)</p>'+
-    (pRows.length?xlTable('Pipeline Proposals',pHead,pRows):'<p>No pipeline proposals.</p>')+
-    '<br>'+
-    (eRows.length?xlTable('E-Files',eHead,eRows):'<p>No e-files.</p>')+
-    '</body></html>';
-  const blob=new Blob([html],{type:'application/vnd.ms-excel;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url; a.download='CCL_CSR_All_Officers_'+new Date().toISOString().slice(0,10)+'.xls'; a.click();
-  URL.revokeObjectURL(url);
-  toast('Excel downloaded — all officers');
+    XLSX.writeFile(wb,'CCL_CSR_All_Officers_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel downloaded — all officers');
+  });
 }
 
 function openAdd(def){
