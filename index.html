@@ -48,6 +48,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .btn-login{width:100%;padding:13px;background:var(--coal);color:#fff;border:none;border-radius:var(--r);font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
 .btn-login:active{background:var(--coal-mid)}
 #login-error{color:var(--red);font-size:12px;text-align:center;margin-top:8px;min-height:18px}
+.login-hint{font-size:11px;color:var(--muted);text-align:center;margin-top:14px;line-height:1.6}
 
 /* ── APP SHELL ──────────────────────────────── */
 #app{display:none}
@@ -314,6 +315,7 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
            onkeydown="if(event.key==='Enter')doLogin()">
     <button class="btn-login" onclick="doLogin()">Sign in &rarr;</button>
     <div id="login-error"></div>
+    <div class="login-hint">GM=0000 &middot; PP=1111 &middot; CK=2222 &middot; JAB=3333<br>SSH=4444 &middot; UK=5555 &middot; PT=6666 &middot; RM=7777</div>
   </div>
 </div>
 
