@@ -6,7 +6,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>CCL CSR Monitor v12</title>
+<title>CCL CSR Monitor v13</title>
 <style>
 :root{
   --coal:#1a1a2e;--coal-mid:#2d2d44;--coal-light:#3d3d5c;
@@ -235,10 +235,21 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
 .rep-table th,.rep-table td{padding:9px 11px;font-size:12px;vertical-align:middle}
 .rep-table thead th{background:#f1f5f9;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;position:sticky;top:0;z-index:2}
 .rep-table tr:hover td{background:#f8f9ff}
+.rep-cb{width:18px;height:18px;cursor:pointer;accent-color:var(--coal);flex-shrink:0}
+.rep-cb:disabled{cursor:not-allowed;opacity:0.4}
+.rep-flag{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700}
+.rep-flag-hr {background:#dbeafe;color:#1d4ed8}
+.rep-flag-fin{background:#fef3c7;color:#92400e}
+.rep-flag-cmd{background:#fce7f3;color:#9d174d}
 .rep-saving{opacity:0.5;pointer-events:none}
+.track-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700}
+.track-tag-pipeline{background:var(--track-pipe-bg);color:var(--track-pipe)}
+.track-tag-efile   {background:var(--track-efile-bg);color:var(--track-efile)}
+.track-tag-mou     {background:var(--track-mou-bg);color:var(--track-mou)}
 .rep-filter-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);background:#fafafa}
 .rep-filter-bar label{font-size:11px;font-weight:600;color:var(--muted)}
 .rep-filter-bar select,.rep-filter-bar input{height:30px;padding:0 8px;border:1px solid var(--border);border-radius:var(--r);font-size:12px;color:var(--text);background:var(--white)}
+.rep-count-badge{background:var(--coal);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:4px}
 </style>
 </head>
 <body>
@@ -532,8 +543,6 @@ async function loadData(silent){
     if(anyNetworkFail){
       setSyncStatus('err','Server unreachable &mdash; showing cached data &nbsp;'+
         '<span style="text-decoration:underline;cursor:pointer;color:#93c5fd" onclick="initApp()">Retry</span>');
-    } else if(_missingTables.length>0){
-      setSyncStatus('ok','Live &middot; setup needed for: '+_missingTables.join(', ')+' &middot; '+t);
     } else {
       setSyncStatus('ok','Live &middot; next refresh in '+REFRESH_SEC+'s &middot; '+t);
     }
@@ -627,8 +636,7 @@ async function persistRow(item){
           rawRes:true
         });
         if(res.status===200||res.status===201||res.status===204){
-          toast('⚠ Saved with limited fields. Ensure database schema is correct.',false);
-          showPage('summary');
+          toast('⚠ Saved with limited fields. Database update required.',false);
           return;
         }
       }
@@ -852,40 +860,7 @@ function renderSummary(){
     ).join('')+'</tbody></table></div></div>'+
 
     renderSummaryStageMatrix()+
-    renderDbSetupNotice()+
     '</div>';
-}
-
-function renderDbSetupNotice(){
-  if(currentUser!=='GM') return '';
-  if(_missingTables.length===0) return '';
-
-  const sql = `-- ══════════════════════════════════════
--- CCL CSR Monitor v12 — Migration SQL
--- Run ONCE in Supabase SQL Editor
--- ══════════════════════════════════════
-
--- STEP 1: Add new tracking columns to reporting_flags
-ALTER TABLE reporting_flags
-  ADD COLUMN IF NOT EXISTS most_followed boolean DEFAULT false;`;
-
-  return '<div class="section" style="border-top:3px solid var(--amber)">'+
-    '<div class="sec-hdr">'+
-    '<span class="sec-title">&#9888; Database setup required</span>'+
-    '<span class="sec-sub">GM view only &mdash; missing columns/tables: '+_missingTables.join(', ')+'</span>'+
-    '</div>'+
-    '<div style="padding:14px">'+
-    '<p style="font-size:12px;color:#7a4a00;margin-bottom:6px;font-weight:600">'+
-    '&#128161; Ensure database is up to date for tracking.'+
-    '</p>'+
-    '<p style="font-size:12px;color:var(--muted);margin-bottom:10px">'+
-    'Copy and run the SQL below in your Supabase Dashboard &rarr; SQL Editor &rarr; New Query:'+
-    '</p>'+
-    '<pre style="background:#1a1a2e;color:#e2e8f0;padding:14px;border-radius:var(--r);font-size:11px;overflow-x:auto;line-height:1.6;white-space:pre-wrap">'+esc(sql)+'</pre>'+
-    '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">'+
-    '<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText('+JSON.stringify(sql)+').then(()=>toast(\'SQL copied to clipboard\'))">&#128203; Copy SQL</button>'+
-    '<a href="https://supabase.com/dashboard" target="_blank" class="btn btn-ghost btn-sm" style="text-decoration:none">&#128279; Open Supabase Dashboard</a>'+
-    '</div></div></div>';
 }
 
 function renderSummaryStageMatrix(){
@@ -1046,19 +1021,21 @@ const TRACK_NEXT_LABEL = {
   mou:     null
 };
 
-function promoteToNextTrack(id, type){
+/* MOVEMENT LOGIC OVERHAUL */
+async function promoteToNextTrack(id, type){
   const srcArr  = getDBArray(type);
   const idx     = srcArr.findIndex(p=>p.id===id);
   if(idx<0) return;
   const srcItem = srcArr[idx];
 
-  const nextType = TRACK_SEQUENCE[type];
-  if(!nextType){ toast('This track is the final stage — no further promotion.',true); return; }
-  if(!confirm('Move "'+srcItem.project+'" to '+TRACKS[nextType].label+'?')) return;
+  const nextTypeStr = TRACK_SEQUENCE[type];
+  if(!nextTypeStr){ toast('This track is the final stage — no further promotion.',true); return; }
+  if(!confirm('Move "'+srcItem.project+'" to '+TRACKS[nextTypeStr].label+'? This will completely transfer it out of the current track.')) return;
 
+  const newId = genId(nextTypeStr[0]);
   const newItem = {
-    id:       genId(nextType[0]),
-    type:     nextType,
+    id:       newId,
+    type:     nextTypeStr,
     officer:  srcItem.officer,
     project:  srcItem.project,
     agency:   srcItem.agency,
@@ -1071,12 +1048,37 @@ function promoteToNextTrack(id, type){
     remark:   'Promoted from '+TRACKS[type].label
   };
 
-  getDBArray(nextType).push(newItem);
-  persistRow(newItem);
-  srcItem.remark = (srcItem.remark?srcItem.remark+' | ':'')+'Promoted to '+TRACKS[nextType].label;
-  persistRow(srcItem);
+  showSaving(true, 'Transferring...');
 
-  toast('Moved to '+TRACKS[nextType].label+' at stage 1 ✓');
+  // 1. Create in new track
+  getDBArray(nextTypeStr).push(newItem);
+  await persistRow(newItem);
+
+  // 2. Transfer the reporting flags to the new ID so it doesn't drop off the GM radar
+  if(DB.reportFlags[srcItem.id]){
+    const oldFlag = DB.reportFlags[srcItem.id];
+    DB.reportFlags[newId] = {
+      project_id:    newId,
+      project_name:  newItem.project,
+      officer:       newItem.officer,
+      track:         nextTypeStr,
+      dir_hr:        oldFlag.dir_hr,
+      dir_fin:       oldFlag.dir_fin,
+      cmd:           oldFlag.cmd,
+      most_followed: oldFlag.most_followed
+    };
+    await saveFlag(newId);
+    
+    // Clear out the old orphaned flag
+    await sbFetch('reporting_flags?project_id=eq.'+encodeURIComponent(srcItem.id), {method:'DELETE', rawRes:true});
+    delete DB.reportFlags[srcItem.id];
+  }
+
+  // 3. Delete from the old track completely
+  await removeRow(srcItem.id, type); 
+
+  showSaving(false);
+  toast('Moved to '+TRACKS[nextTypeStr].label+' ✓');
   showPage(currentPage);
 }
 
