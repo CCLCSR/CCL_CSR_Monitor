@@ -775,20 +775,58 @@ function exportOfficerXLSX(code){
   toast('Excel downloaded for '+label);
 }
 function exportAllXLSX(){
-  let tables='';
-  OFFICERS.forEach(o=>{
-    const {pipeline,efiles}=getOP(o.code);
-    if(!pipeline.length&&!efiles.length) return;
-    const pHead=['Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
-    const eHead=['Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
-    tables+='<h2 style="color:#1a1a2e;border-top:2px solid #1a1a2e;padding-top:14px;margin-top:24px">'+esc2(o.name)+' ('+esc2(o.code)+')</h2>';
-    if(pipeline.length) tables+=xlTable('Pipeline',pHead,pipeline.map(p=>[p.project,p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',stageLabel(p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||'']));
-    if(efiles.length) tables+='<br>'+xlTable('E-Files',eHead,efiles.map(e=>[e.project,e.agency||'',e.ref||'',e.cost||'',e.efileNo||'',e.status||'',e.remark||'']));
-  });
+  // Helper: sort by stage descending, then cost descending
+  function sortPipeline(arr){
+    return [...arr].sort((a,b)=>{
+      const stageDiff=(b.stage||0)-(a.stage||0);
+      if(stageDiff!==0) return stageDiff;
+      return (parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
+    });
+  }
+  function sortEfiles(arr){
+    // E-files: sort by status priority (closer to done = higher) then cost desc
+    const statusRank={'MoU executed':7,'Approved':6,'Processed':5,'Ready':4,'Finance query':3,'In progress':2,'On hold':1};
+    return [...arr].sort((a,b)=>{
+      const rankDiff=(statusRank[b.status]||0)-(statusRank[a.status]||0);
+      if(rankDiff!==0) return rankDiff;
+      return (parseFloat(b.cost)||0)-(parseFloat(a.cost)||0);
+    });
+  }
+  function officerLabel(code){
+    const o=OFFICERS.find(x=>x.code===code);
+    return o?o.name+' ('+o.code+')':code||'Unassigned';
+  }
+
+  // Build flat sorted Pipeline rows (all officers combined)
+  const allPipeline = sortPipeline(DB.pipeline);
+  const pHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
+  const pRows=allPipeline.map(p=>[
+    officerLabel(p.officer),
+    p.project||'', p.agency||'', p.ref||'',
+    p.cost||'', p.apFlag||'',
+    stageLabel(p.stage), p.stageNote||'',
+    p.hold?'Yes':'No', p.remark||''
+  ]);
+
+  // Build flat sorted E-File rows (all officers combined)
+  const allEfiles = sortEfiles(DB.efiles);
+  const eHead=['Officer','Project','Agency','Reference','Cost (Lakhs)','E-file No.','Status','Remark'];
+  const eRows=allEfiles.map(e=>[
+    officerLabel(e.officer),
+    e.project||'', e.agency||'', e.ref||'',
+    e.cost||'', e.efileNo||'',
+    e.status||'', e.remark||''
+  ]);
+
   const html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'+
     '<head><meta charset="UTF-8"><style>body{font-family:Calibri,Arial,sans-serif;font-size:12px}</style></head><body>'+
     '<h1 style="color:#1a1a2e">CCL CSR Monitor &mdash; All Officers &mdash; FY 2026-27</h1>'+
-    '<p style="color:#666">Exported: '+new Date().toLocaleString('en-IN')+'</p>'+tables+'</body></html>';
+    '<p style="color:#666">Exported: '+new Date().toLocaleString('en-IN')+
+    ' &nbsp;&bull;&nbsp; Sorted: Stage (high&rarr;low), then Cost (high&rarr;low)</p>'+
+    (pRows.length?xlTable('Pipeline Proposals',pHead,pRows):'<p>No pipeline proposals.</p>')+
+    '<br>'+
+    (eRows.length?xlTable('E-Files',eHead,eRows):'<p>No e-files.</p>')+
+    '</body></html>';
   const blob=new Blob([html],{type:'application/vnd.ms-excel;charset=utf-8'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
