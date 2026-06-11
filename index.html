@@ -497,43 +497,78 @@ function setSyncStatus(state, msg){
 /* ══════════════════════════════════════════
    DATA LOAD
    ══════════════════════════════════════════ */
+
+/* Safe fetch — returns [] on 404/400 (table may not exist yet), throws on network error */
+async function safeFetch(table, query){
+  try{
+    const res = await sbFetch(table+(query?'?'+query:''), {rawRes:true});
+    if(res.status===404||res.status===400||res.status===406){
+      const txt = await res.text().catch(()=>'');
+      console.warn('Table not found or query error:',table, res.status, txt);
+      /* Signal that this table is missing so we can show setup guidance */
+      if(!_missingTables.includes(table)) _missingTables.push(table);
+      return [];
+    }
+    if(!res.ok){
+      const txt = await res.text().catch(()=>'');
+      console.warn('safeFetch',table,'status',res.status, txt);
+      /* For other errors (e.g. 401, 500) treat as a real failure */
+      throw new Error('HTTP '+res.status+' on '+table);
+    }
+    /* Remove from missing list if it succeeds */
+    _missingTables = _missingTables.filter(t=>t!==table);
+    const txt = await res.text();
+    return txt ? JSON.parse(txt) : [];
+  }catch(e){
+    if(e.message&&e.message.startsWith('HTTP ')){
+      /* Re-throw real HTTP errors so loadData can catch them */
+      throw e;
+    }
+    /* Network / CORS / fetch-itself failures */
+    console.warn('safeFetch network error for',table,e);
+    throw e;
+  }
+}
+
+function mapPipeline(r){ return {id:r.id,type:'pipeline',officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
+function mapEfile(r){    return {id:r.id,type:'efile',   officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
+function mapMou(r){      return {id:r.id,type:'mou',     officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
+
 async function loadData(silent){
   if(!silent) setSyncStatus('syncing','Loading data&hellip;');
   try{
-    const [pRows, eRows, mRows] = await Promise.all([
-      sbSelect('pipeline_projects','order=id.asc'),
-      sbSelect('efile_projects','order=id.asc'),
-      sbSelect('mou_projects','order=id.asc')
+    /* Use allSettled so a missing/broken table never blocks the other two */
+    const [pRes, eRes, mRes] = await Promise.allSettled([
+      safeFetch('pipeline_projects','order=id.asc'),
+      safeFetch('efile_projects',   'order=id.asc'),
+      safeFetch('mou_projects',     'order=id.asc')
     ]);
 
-    DB.pipeline = (pRows||[]).map(r=>({
-      id:r.id, type:'pipeline', officer:r.officer||'', project:r.project||'',
-      agency:r.agency||'', ref:r.ref||'', cost:r.cost||'',
-      stage:r.stage||1, stageNote:r.stage_note||'', hold:r.hold||false,
-      remark:r.remark||'', apFlag:r.ap_flag||''
-    }));
+    /* Only update DB arrays that succeeded */
+    if(pRes.status==='fulfilled') DB.pipeline = pRes.value.map(mapPipeline);
+    if(eRes.status==='fulfilled') DB.efiles   = eRes.value.map(mapEfile);
+    if(mRes.status==='fulfilled') DB.mous     = mRes.value.map(mapMou);
 
-    DB.efiles = (eRows||[]).map(r=>({
-      id:r.id, type:'efile', officer:r.officer||'', project:r.project||'',
-      agency:r.agency||'', ref:r.ref||'', cost:r.cost||'',
-      stage:r.stage||1, stageNote:r.stage_note||'', hold:r.hold||false,
-      remark:r.remark||'', apFlag:r.ap_flag||''
-    }));
-
-    DB.mous = (mRows||[]).map(r=>({
-      id:r.id, type:'mou', officer:r.officer||'', project:r.project||'',
-      agency:r.agency||'', ref:r.ref||'', cost:r.cost||'',
-      stage:r.stage||1, stageNote:r.stage_note||'', hold:r.hold||false,
-      remark:r.remark||''
-    }));
+    const anyNetworkFail = [pRes,eRes,mRes].some(r=>
+      r.status==='rejected' && r.reason && !String(r.reason.message).startsWith('HTTP 4')
+    );
 
     countdown = REFRESH_SEC;
     const t = new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
-    setSyncStatus('ok','Live &middot; next refresh in '+REFRESH_SEC+'s &middot; '+t);
-    return true;
+
+    if(anyNetworkFail){
+      setSyncStatus('err','Server unreachable &mdash; showing cached data &nbsp;'+
+        '<span style="text-decoration:underline;cursor:pointer;color:#93c5fd" onclick="initApp()">Retry</span>');
+    } else if(_missingTables.length>0){
+      setSyncStatus('ok','Live &middot; setup needed for: '+_missingTables.join(', ')+' &middot; '+t);
+    } else {
+      setSyncStatus('ok','Live &middot; next refresh in '+REFRESH_SEC+'s &middot; '+t);
+    }
+    return !anyNetworkFail;
   }catch(e){
     setSyncStatus('err','Server unreachable &mdash; showing cached data &nbsp;'+
       '<span style="text-decoration:underline;cursor:pointer;color:#93c5fd" onclick="initApp()">Retry</span>');
+    console.error('loadData error:',e);
     return false;
   }
 }
@@ -590,22 +625,36 @@ async function persistRow(item){
   showSaving(true);
   try{
     const table = getTable(item.type);
-    const row   = {
+    if(!table){ toast('Unknown record type.',true); return; }
+    const row = {
       id:item.id, officer:item.officer||'', project:item.project||'',
       agency:item.agency||'', ref:item.ref||'', cost:item.cost||'',
       stage:item.stage||1, stage_note:item.stageNote||'',
       hold:item.hold||false, remark:item.remark||'',
       ap_flag:item.apFlag||''
     };
-    await sbUpsert(table, row);
-    await sbInsert('audit_log',{officer:currentUser, action:'SAVE',
-      rec_type:item.type, record_id:item.id, project:item.project||''});
+    /* Use upsert (POST with merge-duplicates + return=minimal) */
+    const res = await sbFetch(table, {
+      method:'POST',
+      prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify(row),
+      rawRes:true
+    });
+    if(res.status!==200&&res.status!==201&&res.status!==204){
+      const txt = await res.text();
+      throw new Error('HTTP '+res.status+': '+txt);
+    }
+    /* Audit log — fire-and-forget, do not let failure block UI */
+    sbInsert('audit_log',{officer:currentUser, action:'SAVE',
+      rec_type:item.type, record_id:item.id, project:item.project||''
+    }).catch(()=>{});
     const t = new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
     setSyncStatus('ok','Saved &middot; '+t);
+    toast('Saved successfully');
   }catch(e){
     setSyncStatus('err','Save failed');
-    toast('Could not save. Check connection.',true);
-    console.error(e);
+    toast('Could not save: '+e.message,true);
+    console.error('persistRow error:',e);
   }finally{ showSaving(false); }
 }
 
@@ -613,17 +662,22 @@ async function removeRow(id, type){
   showSaving(true,'Deleting...');
   try{
     const table = getTable(type);
-    await sbDelete(table, id);
-    await sbInsert('audit_log',{officer:currentUser, action:'DELETE',
-      rec_type:type, record_id:id, project:''});
+    if(!table){ toast('Unknown record type.',true); return; }
+    const res = await sbFetch(table+'?id=eq.'+encodeURIComponent(id), {method:'DELETE', rawRes:true});
+    if(res.status!==200&&res.status!==204){
+      const txt = await res.text();
+      throw new Error('HTTP '+res.status+': '+txt);
+    }
+    sbInsert('audit_log',{officer:currentUser, action:'DELETE',
+      rec_type:type, record_id:id, project:''}).catch(()=>{});
     if(type==='pipeline')    DB.pipeline = DB.pipeline.filter(p=>p.id!==id);
     else if(type==='efile')  DB.efiles   = DB.efiles.filter(e=>e.id!==id);
     else if(type==='mou')    DB.mous     = DB.mous.filter(m=>m.id!==id);
     setSyncStatus('ok','Deleted &middot; '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
   }catch(e){
     setSyncStatus('err','Delete failed');
-    toast('Could not delete.',true);
-    console.error(e);
+    toast('Could not delete: '+e.message,true);
+    console.error('removeRow error:',e);
   }finally{ showSaving(false); }
 }
 
@@ -769,8 +823,8 @@ function renderSummary(){
     '<p>CCL &middot; FY 2026-27 &middot; '+new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})+'</p></div>'+
     '<div class="page-header-actions">'+
     (currentUser==='GM'?'<button class="btn btn-acc" onclick="openAdd(\'\',\'pipeline\')">+ Add</button>':'')+
-    '<button class="btn btn-ghost" onclick="exportAllXLSX()">&#8595; XLS All</button>'+
-    '<button class="btn btn-ghost" onclick="initApp()">&#8635;</button></div></div>'+
+    '<button class="btn btn-ghost" onclick="exportAllXLSX()" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" title="Download all data as Excel">&#8595; XLS All</button>'+
+    '<button class="btn btn-ghost" onclick="initApp()" title="Refresh data">&#8635; Refresh</button></div></div>'+
 
     '<div class="stats-row">'+
     '<div class="stat acc"><div class="lbl">Total</div><div class="val">'+(DB.pipeline.length+DB.efiles.length+DB.mous.length)+'</div><div class="sub">Across all tracks</div></div>'+
@@ -807,8 +861,57 @@ function renderSummary(){
     ).join('')+'</tbody></table></div></div>'+
 
     renderSummaryStageMatrix()+
-
+    renderDbSetupNotice()+
     '</div>';
+}
+
+/* Shows Supabase SQL setup guidance when mou_projects table is missing (GM only) */
+let _missingTables = []; // populated by loadData
+
+function renderDbSetupNotice(){
+  if(currentUser!=='GM') return '';
+  if(_missingTables.length===0) return '';
+
+  const sql = `-- Run in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
+-- 1. Add missing columns to efile_projects (safe — skips if already present)
+ALTER TABLE efile_projects
+  ADD COLUMN IF NOT EXISTS stage      int4    DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS stage_note text    DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hold       boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS ap_flag    text    DEFAULT '';
+
+-- 2. Create mou_projects table (safe — skips if already exists)
+CREATE TABLE IF NOT EXISTS mou_projects (
+  id         text PRIMARY KEY,
+  officer    text DEFAULT '',
+  project    text DEFAULT '',
+  agency     text DEFAULT '',
+  ref        text DEFAULT '',
+  cost       text DEFAULT '',
+  stage      int4    DEFAULT 1,
+  stage_note text    DEFAULT '',
+  hold       boolean DEFAULT false,
+  remark     text    DEFAULT '',
+  ap_flag    text    DEFAULT '',
+  created_at timestamptz DEFAULT now()
+);
+-- Enable Row Level Security (public read/write for anon key)
+ALTER TABLE mou_projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY IF NOT EXISTS "anon_all" ON mou_projects FOR ALL USING (true) WITH CHECK (true);`;
+
+  return '<div class="section" style="border-top:3px solid var(--amber)">'+
+    '<div class="sec-hdr">'+
+    '<span class="sec-title">&#9888; Database setup required</span>'+
+    '<span class="sec-sub">GM view only &mdash; missing: '+_missingTables.join(', ')+'</span>'+
+    '</div>'+
+    '<div style="padding:14px">'+
+    '<p style="font-size:12px;color:var(--muted);margin-bottom:10px">'+
+    'One or more database tables could not be reached (<strong>'+_missingTables.join(', ')+'</strong>). '+
+    'Copy and run the SQL below in your Supabase Dashboard → SQL Editor to create them:'+
+    '</p>'+
+    '<pre style="background:#1a1a2e;color:#e2e8f0;padding:14px;border-radius:var(--r);font-size:11px;overflow-x:auto;line-height:1.6;white-space:pre-wrap">'+esc(sql)+'</pre>'+
+    '<button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="navigator.clipboard&&navigator.clipboard.writeText('+JSON.stringify(sql)+').then(()=>toast(\'SQL copied to clipboard\'))">&#128203; Copy SQL</button>'+
+    '</div></div>';
 }
 
 function renderSummaryStageMatrix(){
@@ -849,7 +952,8 @@ function renderOfficerPage(code){
     '<div><h1>'+officer.name+'</h1>'+
     '<p>'+(canE?'<strong style="color:var(--green)">Edit access</strong>':'<span style="color:var(--muted)">View only</span>')+' &middot; FY 2026-27</p></div></div>'+
     '<div class="page-header-actions">'+
-    '<button class="btn btn-ghost" onclick="exportOfficerXLSX(\''+code+'\')" title="Export to Excel">&#8595; XLS</button>'+
+    '<button class="btn btn-ghost" onclick="exportOfficerXLSX(\''+code+'\')" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" title="Download this officer\'s data as Excel">&#8595; XLS</button>'+
+    '<button class="btn btn-ghost" onclick="initApp()" title="Refresh data">&#8635; Refresh</button>'+
     '</div></div>'+
 
     '<div class="stats-row">'+
@@ -909,7 +1013,8 @@ function renderTrackSection(trackId, items, officerCode, canE){
         '<td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
         (canE?'<td style="white-space:nowrap">'+
           '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')">Edit</button> '+
-          (p.stage<maxStages?'<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')" title="Move to next stage">&#9654;</button>':'<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; Final</span>')+
+          (p.stage<maxStages?'<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')" title="Move to next stage">&#9654;</button> ':'<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; </span>')+
+          '<button class="btn btn-sm" style="background:#fef3e0;color:#d4820a;border-color:#f5d99a" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',true)" title="Mark as on hold">&#9646;&#9646;</button>'+
           '</td>':'')+
         '</tr>').join('')+
       '</tbody></table></div>';
@@ -919,13 +1024,17 @@ function renderTrackSection(trackId, items, officerCode, canE){
 
   if(onHold.length){
     html += '<div style="border-top:1px solid var(--border);padding:8px 14px;background:#fafafa">'+
-      '<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">On hold ('+onHold.length+')</div>'+
-      '<div class="tw"><table><thead><tr><th>Project</th><th>Agency</th><th>Remark</th>'+(canE?'<th></th>':'')+'</tr></thead><tbody>'+
+      '<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">&#9646;&#9646; On hold ('+onHold.length+')</div>'+
+      '<div class="tw"><table><thead><tr><th>Project</th><th>Agency</th><th>Stage</th><th>Remark</th>'+(canE?'<th></th>':'')+'</tr></thead><tbody>'+
       onHold.map(p=>'<tr class="on-hold">'+
         '<td class="pname">'+esc(p.project)+'</td>'+
         '<td class="agt">'+(esc(p.agency)||'&mdash;')+'</td>'+
+        '<td>'+stageBadge(trackId,p.stage,null,false)+'</td>'+
         '<td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
-        (canE?'<td><button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')">Edit</button></td>':'')+
+        (canE?'<td style="white-space:nowrap">'+
+          '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')">Edit</button> '+
+          '<button class="btn btn-sm" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',false)" title="Remove hold">&#9654; Resume</button>'+
+          '</td>':'')+
         '</tr>').join('')+
       '</tbody></table></div></div>';
   }
@@ -944,6 +1053,16 @@ function quickAdvance(id, type){
   arr[idx].stage++;
   persistRow(arr[idx]);
   toast('Advanced to: '+getStageLabel(type,arr[idx].stage));
+  showPage(currentPage);
+}
+
+function quickToggleHold(id, type, holdState){
+  const arr = getDBArray(type);
+  const idx = arr.findIndex(p=>p.id===id);
+  if(idx<0) return;
+  arr[idx].hold = holdState;
+  persistRow(arr[idx]);
+  toast(holdState ? 'Marked as on hold' : 'Hold removed — resumed');
   showPage(currentPage);
 }
 
@@ -1048,9 +1167,11 @@ function saveNew(){
     hold:     document.getElementById('m-hold').checked,
     remark:   document.getElementById('m-remark').value.trim()
   };
+  /* Update local state immediately so UI reflects the new entry */
   getDBArray(type).push(item);
+  /* Persist to Supabase (async, shows own toast on success/fail) */
   persistRow(item);
-  closeModal(); toast('Entry saved');
+  closeModal();
   showPage(officer||currentPage);
 }
 
@@ -1131,7 +1252,8 @@ function saveEdit(id, type){
     remark:    document.getElementById('m-remark').value.trim()
   };
   persistRow(arr[i]);
-  closeModal(); toast('Changes saved'); showPage(currentPage);
+  closeModal();
+  showPage(currentPage);
 }
 
 async function delItem(id, type){
