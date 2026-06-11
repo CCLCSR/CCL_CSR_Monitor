@@ -333,14 +333,9 @@ async function sbFetch(path, opts = {}) {
   const text = await res.text();
   return text ? JSON.parse(text) : null;
 }
-async function sbSelect(table, query) { return sbFetch(table + (query ? '?' + query : '')); }
 async function sbUpsert(table, row) {
   return sbFetch(table, { method: 'POST', prefer: 'resolution=merge-duplicates', body: JSON.stringify(row) });
 }
-async function sbDelete(table, id) {
-  return sbFetch(table + '?id=eq.' + encodeURIComponent(id), { method: 'DELETE', rawRes: true });
-}
-async function sbInsert(table, row) { return sbFetch(table, { method: 'POST', body: JSON.stringify(row) }); }
 
 function randomHex(n) {
   return Array.from(crypto.getRandomValues(new Uint8Array(n))).map(b => b.toString(16).padStart(2,'0')).join('');
@@ -425,16 +420,7 @@ let _missingTables = [];
 /* ══════════════════════════════════════════
    AUTH — LOCAL PIN
    ══════════════════════════════════════════ */
-const LOCAL_PINS = {
-  GM:  '0000',
-  PP:  '1111',
-  CK:  '2222',
-  JAB: '3333',
-  SSH: '4444',
-  UK:  '5555',
-  PT:  '6666',
-  RM:  '7777'
-};
+const LOCAL_PINS = { GM:'0000', PP:'1111', CK:'2222', JAB:'3333', SSH:'4444', UK:'5555', PT:'6666', RM:'7777' };
 
 function doLogin(){
   const code = document.getElementById('login-code').value;
@@ -487,8 +473,7 @@ function logout(){
    SYNC STATUS
    ══════════════════════════════════════════ */
 function setSyncStatus(state, msg){
-  document.getElementById('sync-dot').className = 'sync-dot'
-    +(state==='ok'?'':state==='err'?' err':' syncing');
+  document.getElementById('sync-dot').className = 'sync-dot' + (state==='ok'?'':state==='err'?' err':' syncing');
   document.getElementById('sync-txt').innerHTML = msg;
 }
 
@@ -506,13 +491,11 @@ async function safeFetch(table, query){
     _missingTables = _missingTables.filter(t=>t!==table);
     const txt = await res.text();
     return txt ? JSON.parse(txt) : [];
-  }catch(e){
-    throw e;
-  }
+  }catch(e){ throw e; }
 }
 
 function mapPipeline(r){ return {id:r.id,type:'pipeline',officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
-function mapEfile(r){    return {id:r.id,type:'efile',   officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
+function mapEfile(r){    return {id:r.id,type:'efile',   officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||'',efileNo:r.efile_no||''}; }
 function mapMou(r){      return {id:r.id,type:'mou',     officer:r.officer||'',project:r.project||'',agency:r.agency||'',ref:r.ref||'',cost:r.cost||'',stage:r.stage||1,stageNote:r.stage_note||'',hold:r.hold||false,remark:r.remark||'',apFlag:r.ap_flag||''}; }
 
 async function loadData(silent){
@@ -533,16 +516,14 @@ async function loadData(silent){
       rfRes.value.forEach(r => { DB.reportFlags[r.project_id] = r; });
     }
 
-    const anyNetworkFail = [pRes,eRes,mRes,rfRes].some(r=>
-      r.status==='rejected' && r.reason && !String(r.reason.message).startsWith('HTTP 4')
-    );
-
+    const anyNetworkFail = [pRes,eRes,mRes,rfRes].some(r=> r.status==='rejected' && r.reason && !String(r.reason.message).startsWith('HTTP 4'));
     countdown = REFRESH_SEC;
     const t = new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
 
     if(anyNetworkFail){
-      setSyncStatus('err','Server unreachable &mdash; showing cached data &nbsp;'+
-        '<span style="text-decoration:underline;cursor:pointer;color:#93c5fd" onclick="initApp()">Retry</span>');
+      setSyncStatus('err','Server unreachable &mdash; showing cached data &nbsp;<span style="text-decoration:underline;cursor:pointer;color:#93c5fd" onclick="initApp()">Retry</span>');
+    } else if(_missingTables.length>0){
+      setSyncStatus('ok','Live &middot; setup needed for: '+_missingTables.join(', ')+' &middot; '+t);
     } else {
       setSyncStatus('ok','Live &middot; next refresh in '+REFRESH_SEC+'s &middot; '+t);
     }
@@ -599,9 +580,7 @@ function getTable(type){
 }
 
 async function persistRow(item){
-  if(!canEdit(item.officer||'')&&item.officer){
-    toast('Not authorised to edit this record.',true); return;
-  }
+  if(!canEdit(item.officer||'')&&item.officer){ toast('Not authorised to edit this record.',true); return; }
   showSaving(true);
   try{
     const table = getTable(item.type);
@@ -612,6 +591,7 @@ async function persistRow(item){
       hold:!!item.hold, remark:item.remark||''
     };
     if(item.type==='pipeline') base.ap_flag = item.apFlag||'';
+    if(item.type==='efile')    base.efile_no = item.efileNo||'';
 
     let res = await sbFetch(table, {
       method:'POST',
@@ -624,28 +604,24 @@ async function persistRow(item){
       const txt = await res.text();
       if(txt.includes('PGRST204')){
         if(!_missingTables.includes(table)) _missingTables.push(table);
+        // Fallback minimal mapping (NO new columns like stage, efile_no to ensure save works if db is behind)
         const minimal = {
           id:item.id, officer:item.officer||'', project:item.project||'',
           agency:item.agency||'', ref:item.ref||'', cost:item.cost||''
         };
-        if(item.type==='pipeline') minimal.ap_flag = item.apFlag||'';
         res = await sbFetch(table, {
-          method:'POST',
-          prefer:'resolution=merge-duplicates,return=minimal',
-          body:JSON.stringify(minimal),
-          rawRes:true
+          method:'POST', prefer:'resolution=merge-duplicates,return=minimal',
+          body:JSON.stringify(minimal), rawRes:true
         });
         if(res.status===200||res.status===201||res.status===204){
-          toast('⚠ Saved with limited fields. Database update required.',false);
+          toast('⚠ Saved with limited fields. Database update required.',true);
           return;
         }
       }
       throw new Error('HTTP 400: '+txt);
     }
-
     if(res.status!==200&&res.status!==201&&res.status!==204){
-      const txt = await res.text();
-      throw new Error('HTTP '+res.status+': '+txt);
+      throw new Error('HTTP '+res.status+': '+await res.text());
     }
     setSyncStatus('ok','Saved &middot; '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
     toast('Saved successfully');
@@ -673,10 +649,7 @@ async function removeRow(id, type){
 /* ══════════════════════════════════════════
    HELPERS
    ══════════════════════════════════════════ */
-function genId(p){
-  return p+(typeof crypto!=='undefined'&&crypto.randomUUID?
-    crypto.randomUUID().replace(/-/g,''):Date.now().toString(36)+Math.random().toString(36).slice(2,9));
-}
+function genId(p){ return p+(typeof crypto!=='undefined'&&crypto.randomUUID? crypto.randomUUID().replace(/-/g,''):Date.now().toString(36)+Math.random().toString(36).slice(2,9)); }
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmtCost(v){ const n=parseFloat(v); return Number.isFinite(n)&&n>0?'&#8377;'+n.toFixed(2)+'L':'&mdash;'; }
 function toast(msg,err){
@@ -718,9 +691,7 @@ function stageFlow(type, currentStage){
     const isDone    = s.id < currentStage;
     const isCurrent = s.id === currentStage;
     const cls       = isDone?'done':isCurrent?'current':'';
-    const style     = isCurrent
-      ? 'background:'+track.bg+';color:'+track.color+';box-shadow:0 0 0 2px '+track.color
-      : isDone ? 'background:#e5e7eb;color:#374151' : '';
+    const style     = isCurrent ? 'background:'+track.bg+';color:'+track.color+';box-shadow:0 0 0 2px '+track.color : isDone ? 'background:#e5e7eb;color:#374151' : '';
     h += '<span class="sf-step '+cls+'" style="'+style+'">'+s.label+'</span>';
     if(i < track.stages.length-1) h += '<span class="sf-arrow">›</span>';
   });
@@ -728,20 +699,15 @@ function stageFlow(type, currentStage){
 }
 
 function getOP(code){
-  return {
-    pipeline: DB.pipeline.filter(x=>x.officer===code),
-    efiles:   DB.efiles.filter(x=>x.officer===code),
-    mous:     DB.mous.filter(x=>x.officer===code)
-  };
+  return { pipeline: DB.pipeline.filter(x=>x.officer===code), efiles: DB.efiles.filter(x=>x.officer===code), mous: DB.mous.filter(x=>x.officer===code) };
 }
-
 function totalCount(code){
   const {pipeline,efiles,mous} = getOP(code);
   return pipeline.length + efiles.length + mous.length;
 }
 
 /* ══════════════════════════════════════════
-   NAV
+   NAV & ROUTING
    ══════════════════════════════════════════ */
 function renderNavUser(){
   const name=(OFFICERS.find(o=>o.code===currentUser)||{}).name||currentUser;
@@ -751,28 +717,20 @@ function renderNavUser(){
     '<button class="btn-logout" onclick="logout()">Sign out</button>';
 }
 function renderNav(){
-  let h='<div class="nav-link '+(currentPage==='summary'?'active':'')+'" onclick="showPage(\'summary\')">'+
-    '<span class="nav-dot" style="background:var(--accent)"></span>Summary</div>';
+  let h='<div class="nav-link '+(currentPage==='summary'?'active':'')+'" onclick="showPage(\'summary\')"><span class="nav-dot" style="background:var(--accent)"></span>Summary</div>';
   OFFICERS.forEach(o=>{
     const cnt = totalCount(o.code);
     h+='<div class="nav-link '+(currentPage===o.code?'active':'')+'" onclick="showPage(\''+o.code+'\')">'+
-      '<span class="nav-dot" style="background:'+DOT[o.code]+'"></span>'+o.code+
-      '<span class="nav-count">'+cnt+'</span></div>';
+      '<span class="nav-dot" style="background:'+DOT[o.code]+'"></span>'+o.code+'<span class="nav-count">'+cnt+'</span></div>';
   });
-  /* Reporting tab — GM only */
   if(currentUser==='GM'){
     const flagged = Object.values(DB.reportFlags).filter(f=>f.dir_hr||f.dir_fin||f.cmd||f.most_followed).length;
     h+='<div class="nav-link '+(currentPage==='reporting'?'active':'')+'" onclick="showPage(\'reporting\')">'+
-      '<span class="nav-dot" style="background:#e8a020"></span>📋 Reporting'+
-      (flagged?'<span class="nav-count">'+flagged+'</span>':'')+
-      '</div>';
+      '<span class="nav-dot" style="background:#e8a020"></span>📋 Reporting'+(flagged?'<span class="nav-count">'+flagged+'</span>':'')+'</div>';
   }
   document.getElementById('nav-links').innerHTML=h;
 }
 
-/* ══════════════════════════════════════════
-   ROUTING
-   ══════════════════════════════════════════ */
 function showPage(page){
   if(page==='reporting' && currentUser!=='GM'){ page='summary'; }
   currentPage=page; renderNav();
@@ -789,7 +747,6 @@ function showPage(page){
 function renderSummary(){
   const allItems = [...DB.pipeline, ...DB.efiles, ...DB.mous];
   const pipeActive = DB.pipeline.filter(p=>!p.hold).length;
-  const pipeHold   = DB.pipeline.filter(p=>p.hold).length;
   const eActive    = DB.efiles.filter(e=>!e.hold).length;
   const mouActive  = DB.mous.filter(m=>!m.hold).length;
   const cost = allItems.reduce((a,b)=>{ const n=parseFloat(b.cost); return a+(Number.isFinite(n)?n:0); },0);
@@ -799,9 +756,6 @@ function renderSummary(){
   const dfQ  = DB.efiles.filter(e=>e.stage===4&&!e.hold);
   if(hrQ.length) alerts.push({t:'amber',m:'<strong>'+hrQ.length+' e-file(s) at D(HR) Sir Query</strong> &mdash; '+hrQ.slice(0,3).map(e=>e.project.slice(0,28)).join(', ')+(hrQ.length>3?'…':'')});
   if(dfQ.length) alerts.push({t:'red',  m:'<strong>'+dfQ.length+' e-file(s) at D(F) Sir Query</strong> &mdash; '+dfQ.slice(0,3).map(e=>e.project.slice(0,28)).join(', ')+(dfQ.length>3?'…':'')});
-  if(pipeHold)   alerts.push({t:'amber',m:'<strong>'+pipeHold+' proposal(s) on hold</strong>'});
-  const mouSigned = DB.mous.filter(m=>m.stage===4);
-  if(mouSigned.length) alerts.push({t:'blue',m:'<strong>'+mouSigned.length+' MoU(s) signed</strong> &mdash; '+mouSigned.map(m=>m.project.slice(0,28)).join(', ')});
 
   const oRows = OFFICERS.map(o=>{
     const {pipeline,efiles,mous}=getOP(o.code);
@@ -827,7 +781,7 @@ function renderSummary(){
 
     '<div class="stats-row">'+
     '<div class="stat acc"><div class="lbl">Total</div><div class="val">'+(DB.pipeline.length+DB.efiles.length+DB.mous.length)+'</div><div class="sub">Across all tracks</div></div>'+
-    '<div class="stat blu"><div class="lbl">Pipeline</div><div class="val">'+pipeActive+'</div><div class="sub">'+pipeHold+' on hold</div></div>'+
+    '<div class="stat blu"><div class="lbl">Pipeline</div><div class="val">'+pipeActive+'</div><div class="sub">active</div></div>'+
     '<div class="stat prp"><div class="lbl">E-Files</div><div class="val">'+eActive+'</div><div class="sub">active</div></div>'+
     '<div class="stat tel"><div class="lbl">MoU</div><div class="val">'+mouActive+'</div><div class="sub">in progress</div></div>'+
     '<div class="stat grn"><div class="lbl">Cost</div><div class="val">&#8377;'+Math.round(cost)+'L</div><div class="sub">total outlay</div></div>'+
@@ -837,51 +791,71 @@ function renderSummary(){
 
     '<div class="section"><div class="sec-hdr"><span class="sec-title">Officer workload</span></div>'+
     '<div class="tw"><table><thead><tr>'+
-    '<th>Officer</th>'+
-    '<th title="Pipeline Proposals active">Pipeline</th>'+
-    '<th title="BBL Prep + BBL Submitted">BBL stage</th>'+
-    '<th title="E-files active">E-Files</th>'+
-    '<th title="D(HR)/D(F) queries">Queries</th>'+
-    '<th title="MoU items">MoU</th>'+
-    '<th title="On hold">Hold</th>'+
-    '<th>Load</th>'+
-    '</tr></thead><tbody>'+
+    '<th>Officer</th><th title="Pipeline Proposals active">Pipeline</th><th title="BBL Prep + BBL Submitted">BBL stage</th>'+
+    '<th title="E-files active">E-Files</th><th title="D(HR)/D(F) queries">Queries</th><th title="MoU items">MoU</th>'+
+    '<th title="On hold">Hold</th><th>Load</th></tr></thead><tbody>'+
     oRows.map(({o,pAct,pHld,bbl,ef,efQ,mo})=>
       '<tr><td><div style="display:flex;align-items:center;gap:8px">'+av(o.code)+
       '<div><div style="font-weight:700;font-size:12px">'+o.name+'</div>'+
       '<span style="font-size:11px;color:var(--blue);cursor:pointer" onclick="showPage(\''+o.code+'\')">'+o.code+' &rarr;</span></div></div></td>'+
-      '<td><strong>'+pAct+'</strong></td>'+
-      '<td>'+(bbl?'<span class="badge pp3">'+bbl+'</span>':'&mdash;')+'</td>'+
-      '<td>'+(ef?'<span class="badge ep1">'+ef+'</span>':'&mdash;')+'</td>'+
-      '<td>'+(efQ?'<span class="badge ep3">'+efQ+'</span>':'&mdash;')+'</td>'+
-      '<td>'+(mo?'<span class="badge mp1">'+mo+'</span>':'&mdash;')+'</td>'+
-      '<td>'+(pHld?'<span class="badge bhold">'+pHld+'</span>':'&mdash;')+'</td>'+
+      '<td><strong>'+pAct+'</strong></td><td>'+(bbl?'<span class="badge pp3">'+bbl+'</span>':'&mdash;')+'</td>'+
+      '<td>'+(ef?'<span class="badge ep1">'+ef+'</span>':'&mdash;')+'</td><td>'+(efQ?'<span class="badge ep3">'+efQ+'</span>':'&mdash;')+'</td>'+
+      '<td>'+(mo?'<span class="badge mp1">'+mo+'</span>':'&mdash;')+'</td><td>'+(pHld?'<span class="badge bhold">'+pHld+'</span>':'&mdash;')+'</td>'+
       '<td><div class="pbar"><div class="pbar-fill" style="width:'+Math.round(((pAct+ef+mo)/maxLoad)*100)+'%;background:'+DOT[o.code]+'"></div></div></td></tr>'
     ).join('')+'</tbody></table></div></div>'+
-
     renderSummaryStageMatrix()+
+    renderDbSetupNotice()+
     '</div>';
+}
+
+function renderDbSetupNotice(){
+  if(currentUser!=='GM') return '';
+  const sql = `-- RUN THIS IN SUPABASE SQL EDITOR TO FIX 'SAVED WITH LIMITED FIELDS' ERRORS
+ALTER TABLE pipeline_projects
+  ADD COLUMN IF NOT EXISTS stage int4 DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS stage_note text DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hold boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS remark text DEFAULT '';
+
+ALTER TABLE efile_projects
+  ADD COLUMN IF NOT EXISTS efile_no text DEFAULT '',
+  ADD COLUMN IF NOT EXISTS stage int4 DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS stage_note text DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hold boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS remark text DEFAULT '';
+
+ALTER TABLE mou_projects
+  ADD COLUMN IF NOT EXISTS stage int4 DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS stage_note text DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hold boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS remark text DEFAULT '';
+
+ALTER TABLE reporting_flags
+  ADD COLUMN IF NOT EXISTS most_followed boolean DEFAULT false;`;
+
+  return '<div class="section" style="border-top:3px solid var(--amber)"><div class="sec-hdr">'+
+    '<span class="sec-title">&#9888; Database setup required</span></div><div style="padding:14px">'+
+    '<p style="font-size:12px;color:#7a4a00;margin-bottom:6px;font-weight:600">Run the SQL below in your Supabase Dashboard to permanently fix "Saved with limited fields" errors.</p>'+
+    '<pre style="background:#1a1a2e;color:#e2e8f0;padding:14px;border-radius:var(--r);font-size:11px;overflow-x:auto;white-space:pre-wrap">'+esc(sql)+'</pre>'+
+    '</div></div>';
 }
 
 function renderSummaryStageMatrix(){
   let h = '<div class="section"><div class="sec-hdr"><span class="sec-title">Stage matrix — all tracks</span></div><div style="padding:14px">';
-
   ['pipeline','efile','mou'].forEach(trackId=>{
     const track = TRACKS[trackId];
     const arr   = trackId==='pipeline'?DB.pipeline:trackId==='efile'?DB.efiles:DB.mous;
-    h += '<div style="margin-bottom:16px">'+
-      '<div class="track-pill" style="background:'+track.bg+';color:'+track.color+';margin-bottom:8px">'+track.icon+' '+track.label+'</div>'+
+    h += '<div style="margin-bottom:16px"><div class="track-pill" style="background:'+track.bg+';color:'+track.color+';margin-bottom:8px">'+track.icon+' '+track.label+'</div>'+
       '<div class="tw"><table><thead><tr><th>Stage</th>'+
       OFFICERS.map(o=>'<th style="text-align:center">'+o.code+'</th>').join('')+
       '<th style="text-align:center">Total</th></tr></thead><tbody>'+
       track.stages.map(s=>{
-        const row  = OFFICERS.map(o=>arr.filter(p=>p.officer===o.code&&p.stage===s.id&&!p.hold).length);
-        const tot  = arr.filter(p=>p.stage===s.id&&!p.hold).length;
+        const row = OFFICERS.map(o=>arr.filter(p=>p.officer===o.code&&p.stage===s.id&&!p.hold).length);
+        const tot = arr.filter(p=>p.stage===s.id&&!p.hold).length;
         return '<tr><td><span class="badge '+s.badge+'">'+s.id+'. '+s.label+'</span></td>'+
           row.map(c=>'<td style="text-align:center">'+(c?'<strong>'+c+'</strong>':'<span style="color:#e5e7eb">&middot;</span>')+'</td>').join('')+
           '<td style="text-align:center;font-weight:700">'+(tot||'&mdash;')+'</td></tr>';
-      }).join('')+
-      '</tbody></table></div></div>';
+      }).join('')+'</tbody></table></div></div>';
   });
   return h+'</div></div>';
 }
@@ -898,31 +872,13 @@ function renderOfficerPage(code){
 
   let html='<div class="page active">'+
     '<div class="page-header"><div style="display:flex;align-items:center;gap:10px">'+av(code,true)+
-    '<div><h1>'+officer.name+'</h1>'+
-    '<p>'+(canE?'<strong style="color:var(--green)">Edit access</strong>':'<span style="color:var(--muted)">View only</span>')+' &middot; FY 2026-27</p></div></div>'+
-    '<div class="page-header-actions">'+
-    '<button class="btn" onclick="exportOfficerXLSX(\''+code+'\')" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700" title="Download officer data as Excel">&#8681; Excel</button>'+
-    '<button class="btn btn-ghost" onclick="initApp()" title="Refresh data">&#8635; Refresh</button>'+
-    '</div></div>'+
-
-    '<div class="stats-row">'+
-    '<div class="stat blu"><div class="lbl">Pipeline</div><div class="val">'+pipeline.filter(p=>!p.hold).length+'</div><div class="sub">'+pipeline.filter(p=>p.hold).length+' on hold</div></div>'+
-    '<div class="stat prp"><div class="lbl">E-Files</div><div class="val">'+efiles.filter(e=>!e.hold).length+'</div><div class="sub">active</div></div>'+
-    '<div class="stat tel"><div class="lbl">MoU</div><div class="val">'+mous.filter(m=>!m.hold).length+'</div><div class="sub">in progress</div></div>'+
-    '<div class="stat grn"><div class="lbl">Cost</div><div class="val">&#8377;'+Math.round(cost)+'L</div></div>'+
-    '</div>';
+    '<div><h1>'+officer.name+'</h1><p>'+(canE?'<strong style="color:var(--green)">Edit access</strong>':'<span style="color:var(--muted)">View only</span>')+' &middot; FY 2026-27</p></div></div>'+
+    '<div class="page-header-actions"><button class="btn" onclick="exportOfficerXLSX(\''+code+'\')" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700">&#8681; Excel</button><button class="btn btn-ghost" onclick="initApp()">&#8635; Refresh</button></div></div>'+
+    '<div class="stats-row"><div class="stat blu"><div class="lbl">Pipeline</div><div class="val">'+pipeline.filter(p=>!p.hold).length+'</div></div><div class="stat prp"><div class="lbl">E-Files</div><div class="val">'+efiles.filter(e=>!e.hold).length+'</div></div><div class="stat tel"><div class="lbl">MoU</div><div class="val">'+mous.filter(m=>!m.hold).length+'</div></div><div class="stat grn"><div class="lbl">Cost</div><div class="val">&#8377;'+Math.round(cost)+'L</div></div></div>';
 
   html += renderTrackSection('pipeline', pipeline, code, canE);
   html += renderTrackSection('efile', efiles, code, canE);
   html += renderTrackSection('mou', mous, code, canE);
-
-  if(!pipeline.length && !efiles.length && !mous.length){
-    html += '<div class="section"><div class="empty-state">'+
-      '<div class="es-icon">📂</div>'+
-      '<p>No projects assigned yet.'+(canE?' Use the buttons above to add entries.':'')+'</p>'+
-      '</div></div>';
-  }
-
   return html+'</div>';
 }
 
@@ -932,96 +888,47 @@ function renderTrackSection(trackId, items, officerCode, canE){
   const onHold = items.filter(p=>p.hold);
   const maxStages = track.stages.length;
 
-  let html = '<div class="section track-'+trackId+'">'+
-    '<div class="track-header">'+
-    '<span class="track-pill">'+track.icon+' '+track.label+'</span>'+
-    '<span class="sec-sub">'+items.length+' item(s)</span>'+
-    '<div style="margin-left:auto;display:flex;gap:6px">'+
-    (canE?'<button class="btn btn-sm btn-'+trackId+'" onclick="openAdd(\''+officerCode+'\',\''+trackId+'\')">+ Add</button>':'')+
-    '</div></div>';
+  let html = '<div class="section track-'+trackId+'"><div class="track-header"><span class="track-pill">'+track.icon+' '+track.label+'</span><span class="sec-sub">'+items.length+' item(s)</span><div style="margin-left:auto;display:flex;gap:6px">'+(canE?'<button class="btn btn-sm btn-'+trackId+'" onclick="openAdd(\''+officerCode+'\',\''+trackId+'\')">+ Add</button>':'')+'</div></div>';
 
   if(active.length){
     html += '<div class="tw"><table id="tbl-'+trackId+'-'+officerCode+'"><thead><tr>'+
-      '<th>#</th><th>Project</th><th>Agency</th><th>Ref.</th><th>Cost</th>'+
-      '<th>Stage</th><th>Note</th><th>Remarks</th>'+
-      (canE?'<th></th>':'')+
-      '</tr></thead><tbody>'+
+      '<th>#</th><th>Project</th><th>Agency</th><th>Ref.</th>'+
+      (trackId==='efile'?'<th>E-File No.</th>':'')+
+      '<th>Cost</th><th>Stage</th><th>Note</th><th>Remarks</th>'+(canE?'<th></th>':'')+'</tr></thead><tbody>'+
       active.map((p,i)=>'<tr data-stage="'+p.stage+'">'+
-        '<td style="color:var(--muted);font-size:11px">'+(i+1)+'</td>'+
-        '<td class="pname">'+esc(p.project)+'</td>'+
-        '<td class="agt">'+(esc(p.agency)||'&mdash;')+'</td>'+
+        '<td style="color:var(--muted);font-size:11px">'+(i+1)+'</td><td class="pname">'+esc(p.project)+'</td><td class="agt">'+(esc(p.agency)||'&mdash;')+'</td>'+
         '<td style="font-size:11px;color:var(--muted)">'+(esc(p.ref)||'&mdash;')+'</td>'+
-        '<td class="cost">'+fmtCost(p.cost)+'</td>'+
-        '<td>'+stageBadge(trackId,p.stage,null,false)+'</td>'+
-        '<td style="font-size:11px;color:var(--muted)">'+(esc(p.stageNote)||'&mdash;')+'</td>'+
-        '<td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
-        (canE?'<td style="white-space:nowrap">'+
-          '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')" >Edit</button> '+
-          (p.stage<maxStages
-            ? '<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')" title="Advance to next stage">&#9654; Next</button> '
-            : (TRACK_SEQUENCE[trackId]!==null
-               ? '<button class="btn btn-sm" style="background:#1a5fa8;color:#fff;border-color:#1248a0;font-weight:700" onclick="promoteToNextTrack(\''+p.id+'\',\''+trackId+'\')" title="Move to next track">'+TRACK_NEXT_LABEL[trackId]+'</button> '
-               : '<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; Complete </span>'))+
-          '<button class="btn btn-sm" style="background:#fef3e0;color:#d4820a;border-color:#f5d99a" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',true)" title="Mark as on hold">&#9646;&#9646; Hold</button>'+
-          '</td>':'')+
-        '</tr>').join('')+
-      '</tbody></table></div>';
-  } else {
-    html += '<div class="empty-state" style="padding:20px"><p>No active '+track.label.toLowerCase()+' entries.'+(canE?' Click <em>+ Add</em> to start.':'')+'</p></div>';
-  }
-
-  if(onHold.length){
-    html += '<div style="border-top:1px solid var(--border);padding:8px 14px;background:#fafafa">'+
-      '<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">&#9646;&#9646; On hold ('+onHold.length+')</div>'+
-      '<div class="tw"><table><thead><tr><th>Project</th><th>Agency</th><th>Stage</th><th>Remark</th>'+(canE?'<th></th>':'')+'</tr></thead><tbody>'+
-      onHold.map(p=>'<tr class="on-hold">'+
-        '<td class="pname">'+esc(p.project)+'</td>'+
-        '<td class="agt">'+(esc(p.agency)||'&mdash;')+'</td>'+
-        '<td>'+stageBadge(trackId,p.stage,null,false)+'</td>'+
-        '<td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
-        (canE?'<td style="white-space:nowrap">'+
-          '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')">Edit</button> '+
-          '<button class="btn btn-sm" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',false)" title="Remove hold">&#9654; Resume</button>'+
-          '</td>':'')+
-        '</tr>').join('')+
-      '</tbody></table></div></div>';
-  }
-
+        (trackId==='efile'?'<td style="font-size:11px;color:var(--blue);font-weight:600">'+(esc(p.efileNo)||'&mdash;')+'</td>':'')+
+        '<td class="cost">'+fmtCost(p.cost)+'</td><td>'+stageBadge(trackId,p.stage,null,false)+'</td>'+
+        '<td style="font-size:11px;color:var(--muted)">'+(esc(p.stageNote)||'&mdash;')+'</td><td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
+        (canE?'<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')" >Edit</button> '+
+          (p.stage<maxStages ? '<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')">&#9654; Next</button> ' : (TRACK_SEQUENCE[trackId]!==null ? '<button class="btn btn-sm" style="background:#1a5fa8;color:#fff;border-color:#1248a0;font-weight:700" onclick="promoteToNextTrack(\''+p.id+'\',\''+trackId+'\')">'+TRACK_NEXT_LABEL[trackId]+'</button> ' : '<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; Complete </span>'))+
+          '<button class="btn btn-sm" style="background:#fef3e0;color:#d4820a;border-color:#f5d99a" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',true)">&#9646;&#9646; Hold</button></td>':'')+
+        '</tr>').join('')+'</tbody></table></div>';
+  } else { html += '<div class="empty-state" style="padding:20px"><p>No active entries.</p></div>'; }
   return html+'</div>';
 }
 
 function quickAdvance(id, type){
-  const arr   = getDBArray(type);
+  const arr = getDBArray(type);
   const track = TRACKS[type];
-  const idx   = arr.findIndex(p=>p.id===id);
+  const idx = arr.findIndex(p=>p.id===id);
   if(idx<0) return;
-  const item = arr[idx];
-  if(item.stage < track.stages.length){
-    item.stage++;
-    persistRow(item);
-    toast('Advanced to: '+getStageLabel(type,item.stage));
-  }
+  if(arr[idx].stage < track.stages.length){ arr[idx].stage++; persistRow(arr[idx]); toast('Advanced to: '+getStageLabel(type,arr[idx].stage)); }
   showPage(currentPage);
 }
-
 function quickToggleHold(id, type, holdState){
   const arr = getDBArray(type);
   const idx = arr.findIndex(p=>p.id===id);
   if(idx<0) return;
-  arr[idx].hold = holdState;
-  persistRow(arr[idx]);
-  toast(holdState ? 'Marked as on hold' : 'Hold removed — resumed');
+  arr[idx].hold = holdState; persistRow(arr[idx]); toast(holdState ? 'Marked as on hold' : 'Hold removed — resumed');
   showPage(currentPage);
 }
 
 const TRACK_SEQUENCE = { pipeline:'efile', efile:'mou', mou:null };
-const TRACK_NEXT_LABEL = {
-  pipeline:'Move to E-Files ▶',
-  efile:   'Move to MoU ▶',
-  mou:     null
-};
+const TRACK_NEXT_LABEL = { pipeline:'Move to E-Files ▶', efile:'Move to MoU ▶', mou:null };
 
-/* MOVEMENT LOGIC OVERHAUL */
+/* ════ MOVEMENT LOGIC OVERHAUL ════ */
 async function promoteToNextTrack(id, type){
   const srcArr  = getDBArray(type);
   const idx     = srcArr.findIndex(p=>p.id===id);
@@ -1030,7 +937,15 @@ async function promoteToNextTrack(id, type){
 
   const nextTypeStr = TRACK_SEQUENCE[type];
   if(!nextTypeStr){ toast('This track is the final stage — no further promotion.',true); return; }
+  
+  // Standard Confirmation
   if(!confirm('Move "'+srcItem.project+'" to '+TRACKS[nextTypeStr].label+'? This will completely transfer it out of the current track.')) return;
+
+  // New Popup specifically for E-File Number punch-in
+  let efilePromptVal = '';
+  if (nextTypeStr === 'efile') {
+      efilePromptVal = prompt('Enter E-office/E-file number for this project (leave blank if none):', '') || '';
+  }
 
   const newId = genId(nextTypeStr[0]);
   const newItem = {
@@ -1045,7 +960,8 @@ async function promoteToNextTrack(id, type){
     stage:    1,
     stageNote:'',
     hold:     false,
-    remark:   'Promoted from '+TRACKS[type].label
+    remark:   'Promoted from '+TRACKS[type].label,
+    efileNo:  efilePromptVal
   };
 
   showSaving(true, 'Transferring...');
@@ -1054,7 +970,7 @@ async function promoteToNextTrack(id, type){
   getDBArray(nextTypeStr).push(newItem);
   await persistRow(newItem);
 
-  // 2. Transfer the reporting flags to the new ID so it doesn't drop off the GM radar
+  // 2. Transfer reporting flags to the new ID so it doesn't drop off the GM radar
   if(DB.reportFlags[srcItem.id]){
     const oldFlag = DB.reportFlags[srcItem.id];
     DB.reportFlags[newId] = {
@@ -1068,13 +984,12 @@ async function promoteToNextTrack(id, type){
       most_followed: oldFlag.most_followed
     };
     await saveFlag(newId);
-    
-    // Clear out the old orphaned flag
+    // Delete old flag safely
     await sbFetch('reporting_flags?project_id=eq.'+encodeURIComponent(srcItem.id), {method:'DELETE', rawRes:true});
     delete DB.reportFlags[srcItem.id];
   }
 
-  // 3. Delete from the old track completely
+  // 3. Delete completely from the old track (Resolves the duplicate visible issue)
   await removeRow(srcItem.id, type); 
 
   showSaving(false);
@@ -1090,42 +1005,25 @@ function openAdd(defOfficer, trackId){
   const track = TRACKS[trackId] || TRACKS.pipeline;
 
   document.getElementById('modal-content').innerHTML=
-    '<span class="modal-handle"></span>'+
-    '<h2>Add new entry</h2>'+
+    '<span class="modal-handle"></span><h2>Add new entry</h2>'+
     '<div class="modal-track-tag modal-track-'+trackId+'">'+track.icon+' '+track.label+'</div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Track</label>'+
-    '<select id="m-type" onchange="switchTrackInModal(this.value,\''+defOfficer+'\')">'+
+    '<div class="frow"><div class="fg"><label>Track</label><select id="m-type" onchange="switchTrackInModal(this.value,\''+defOfficer+'\')">'+
     Object.values(TRACKS).map(t=>'<option value="'+t.id+'"'+(t.id===trackId?' selected':'')+'>'+t.icon+' '+t.label+'</option>').join('')+
-    '</select></div>'+
-    '<div class="fg"><label>Assigned officer</label>'+
-    '<select id="m-officer"'+(isGM?'':' disabled')+'>'+
+    '</select></div><div class="fg"><label>Assigned officer</label><select id="m-officer"'+(isGM?'':' disabled')+'>'+
     OFFICERS.map(o=>'<option value="'+o.code+'"'+(o.code===(defOfficer||currentUser)?' selected':'')+'>'+o.code+' — '+o.name+'</option>').join('')+
-    '<option value="">Unassigned</option>'+
-    '</select></div></div>'+
+    '<option value="">Unassigned</option></select></div></div>'+
     '<div class="fg"><label>Project name *</label><input type="text" id="m-project" placeholder="Full project name"></div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Agency / Implementing body</label><input type="text" id="m-agency"></div>'+
-    '<div class="fg"><label>Reference (MP / DC / MoC)</label><input type="text" id="m-ref"></div>'+
-    '</div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Cost (&#8377; Lakhs)</label><input type="number" id="m-cost" step="0.01"></div>'+
-    '<div class="fg"><label>AP / Non-AP</label><select id="m-apflag"><option value="">—</option><option value="AP">AP</option><option value="Non-AP">Non-AP</option></select></div>'+
-    '</div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Stage</label>'+
-    '<select id="m-stage">'+
-    track.stages.map(s=>'<option value="'+s.id+'">'+s.id+'. '+s.label+'</option>').join('')+
-    '</select></div>'+
-    '<div class="fg"><label>Stage note</label><input type="text" id="m-snote" placeholder="Optional note"></div>'+
-    '</div>'+
-    '<div class="fg"><label>On hold?</label>'+
-    '<div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-hold"><span class="tslider"></span></label><span>Mark as on hold</span></div></div>'+
-    '<div class="fg"><label>Remarks</label><textarea id="m-remark" placeholder="Notes, queries, hold reasons…"></textarea></div>'+
-    '<div class="modal-actions">'+
-    '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
-    '<button class="btn btn-acc" onclick="saveNew()">Save</button>'+
-    '</div>';
+    '<div class="frow"><div class="fg"><label>Agency</label><input type="text" id="m-agency"></div><div class="fg"><label>Reference</label><input type="text" id="m-ref"></div></div>'+
+    '<div class="frow"><div class="fg"><label>Cost (&#8377; Lakhs)</label><input type="number" id="m-cost" step="0.01"></div><div class="fg"><label>AP / Non-AP</label><select id="m-apflag"><option value="">—</option><option value="AP">AP</option><option value="Non-AP">Non-AP</option></select></div></div>'+
+    
+    // NEW FIELD FOR E-FILES ONLY
+    '<div class="fg efile-only" '+(trackId==='efile'?'':'style="display:none"')+'>'+
+    '<label>E-file Number</label><input type="text" id="m-efile-no" placeholder="E-office / E-file number"></div>'+
+    
+    '<div class="frow"><div class="fg"><label>Stage</label><select id="m-stage">'+track.stages.map(s=>'<option value="'+s.id+'">'+s.id+'. '+s.label+'</option>').join('')+'</select></div><div class="fg"><label>Stage note</label><input type="text" id="m-snote"></div></div>'+
+    '<div class="fg"><label>On hold?</label><div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-hold"><span class="tslider"></span></label><span>Mark as on hold</span></div></div>'+
+    '<div class="fg"><label>Remarks</label><textarea id="m-remark"></textarea></div>'+
+    '<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-acc" onclick="saveNew()">Save</button></div>';
   document.getElementById('modal-bg').classList.add('open');
 }
 
@@ -1134,19 +1032,18 @@ function switchTrackInModal(trackId, defOfficer){
   const sel   = document.getElementById('m-stage');
   if(sel){ sel.innerHTML = track.stages.map(s=>'<option value="'+s.id+'">'+s.id+'. '+s.label+'</option>').join(''); }
   const tag = document.querySelector('.modal-track-tag');
-  if(tag){
-    tag.className = 'modal-track-tag modal-track-'+trackId;
-    tag.innerHTML = track.icon+' '+track.label;
-  }
+  if(tag){ tag.className = 'modal-track-tag modal-track-'+trackId; tag.innerHTML = track.icon+' '+track.label; }
+  
+  // Toggle E-file Number visibility dynamically
+  const efNodes = document.querySelectorAll('.efile-only');
+  efNodes.forEach(n => n.style.display = (trackId==='efile') ? 'block' : 'none');
 }
 
 function saveNew(){
   const project = document.getElementById('m-project').value.trim();
   if(!project){ toast('Project name is required.',true); return; }
   const rawCost = document.getElementById('m-cost').value;
-  if(rawCost!==''&&(!Number.isFinite(parseFloat(rawCost))||parseFloat(rawCost)<0)){
-    toast('Cost must be a positive number.',true); return;
-  }
+  if(rawCost!==''&&(!Number.isFinite(parseFloat(rawCost))||parseFloat(rawCost)<0)){ toast('Cost must be a positive number.',true); return; }
   const type    = document.getElementById('m-type').value;
   const officer = document.getElementById('m-officer').value;
   const item = {
@@ -1158,15 +1055,13 @@ function saveNew(){
     ref:      document.getElementById('m-ref').value.trim(),
     cost:     document.getElementById('m-cost').value,
     apFlag:   document.getElementById('m-apflag').value,
+    efileNo:  document.getElementById('m-efile-no') ? document.getElementById('m-efile-no').value.trim() : '',
     stage:    parseInt(document.getElementById('m-stage').value)||1,
     stageNote:document.getElementById('m-snote').value.trim(),
     hold:     document.getElementById('m-hold').checked,
     remark:   document.getElementById('m-remark').value.trim()
   };
-  getDBArray(type).push(item);
-  persistRow(item);
-  closeModal();
-  showPage(officer||currentPage);
+  getDBArray(type).push(item); persistRow(item); closeModal(); showPage(officer||currentPage);
 }
 
 function openEdit(id, type){
@@ -1178,45 +1073,23 @@ function openEdit(id, type){
   const dis   = canE?'':' disabled';
 
   document.getElementById('modal-content').innerHTML=
-    '<span class="modal-handle"></span>'+
-    '<h2>Edit entry</h2>'+
+    '<span class="modal-handle"></span><h2>Edit entry</h2>'+
     '<div class="modal-track-tag modal-track-'+type+'">'+track.icon+' '+track.label+'</div>'+
     (!canE?'<div class="ro-notice">&#9888; View only — only '+(item.officer||'assigned officer')+' or GM can edit.</div>':'')+
     '<div class="fg"><label>Project name</label><input type="text" id="m-project" value="'+esc(item.project)+'"'+dis+'></div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Agency</label><input type="text" id="m-agency" value="'+esc(item.agency)+'"'+dis+'></div>'+
-    '<div class="fg"><label>Reference</label><input type="text" id="m-ref" value="'+esc(item.ref)+'"'+dis+'></div>'+
-    '</div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Cost (&#8377; Lakhs)</label><input type="number" id="m-cost" step="0.01" value="'+(item.cost||'')+'"'+dis+'></div>'+
-    '<div class="fg"><label>AP / Non-AP</label><select id="m-apflag"'+dis+'>'+
-      '<option value="">—</option>'+
-      '<option value="AP"'+(item.apFlag==='AP'?' selected':'')+'>AP</option>'+
-      '<option value="Non-AP"'+(item.apFlag==='Non-AP'?' selected':'')+'>Non-AP</option>'+
-    '</select></div>'+
-    '</div>'+
-    '<div class="frow">'+
-    '<div class="fg"><label>Assigned officer</label><select id="m-officer"'+(currentUser!=='GM'?' disabled':'')+'>'+
-      OFFICERS.map(o=>'<option value="'+o.code+'"'+(o.code===item.officer?' selected':'')+'>'+o.code+' — '+o.name+'</option>').join('')+
-      '<option value=""'+(!item.officer?' selected':'')+'>Unassigned</option>'+
-    '</select></div>'+
-    '<div class="fg"><label>Stage note</label><input type="text" id="m-snote" value="'+esc(item.stageNote)+'"'+dis+'></div>'+
-    '</div>'+
-    '<div class="fg"><label>Stage</label>'+
-    '<select id="m-stage"'+dis+'>'+
-    track.stages.map(s=>'<option value="'+s.id+'"'+(s.id===item.stage?' selected':'')+'>'+s.id+'. '+s.label+'</option>').join('')+
-    '</select></div>'+
+    '<div class="frow"><div class="fg"><label>Agency</label><input type="text" id="m-agency" value="'+esc(item.agency)+'"'+dis+'></div><div class="fg"><label>Reference</label><input type="text" id="m-ref" value="'+esc(item.ref)+'"'+dis+'></div></div>'+
+    '<div class="frow"><div class="fg"><label>Cost (&#8377; Lakhs)</label><input type="number" id="m-cost" step="0.01" value="'+(item.cost||'')+'"'+dis+'></div><div class="fg"><label>AP / Non-AP</label><select id="m-apflag"'+dis+'><option value="">—</option><option value="AP"'+(item.apFlag==='AP'?' selected':'')+'>AP</option><option value="Non-AP"'+(item.apFlag==='Non-AP'?' selected':'')+'>Non-AP</option></select></div></div>'+
+    
+    // NEW FIELD FOR E-FILES ONLY
+    '<div class="fg efile-only" '+(type==='efile'?'':'style="display:none"')+'>'+
+    '<label>E-file Number</label><input type="text" id="m-efile-no" value="'+esc(item.efileNo||'')+'"'+dis+'></div>'+
+
+    '<div class="frow"><div class="fg"><label>Assigned officer</label><select id="m-officer"'+(currentUser!=='GM'?' disabled':'')+'>'+OFFICERS.map(o=>'<option value="'+o.code+'"'+(o.code===item.officer?' selected':'')+'>'+o.code+' — '+o.name+'</option>').join('')+'<option value=""'+(!item.officer?' selected':'')+'>Unassigned</option></select></div><div class="fg"><label>Stage note</label><input type="text" id="m-snote" value="'+esc(item.stageNote)+'"'+dis+'></div></div>'+
+    '<div class="fg"><label>Stage</label><select id="m-stage"'+dis+'>'+track.stages.map(s=>'<option value="'+s.id+'"'+(s.id===item.stage?' selected':'')+'>'+s.id+'. '+s.label+'</option>').join('')+'</select></div>'+
     stageFlow(type, item.stage)+
-    '<div class="fg" style="margin-top:10px"><label>On hold?</label>'+
-    '<div class="toggle-row"><label class="toggle">'+
-    '<input type="checkbox" id="m-hold"'+(item.hold?' checked':'')+(canE?'':' disabled')+'>'+
-    '<span class="tslider"></span></label><span>Mark as on hold</span></div></div>'+
+    '<div class="fg" style="margin-top:10px"><label>On hold?</label><div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-hold"'+(item.hold?' checked':'')+(canE?'':' disabled')+'><span class="tslider"></span></label><span>Mark as on hold</span></div></div>'+
     '<div class="fg"><label>Remarks</label><textarea id="m-remark"'+dis+'>'+esc(item.remark)+'</textarea></div>'+
-    '<div class="modal-actions">'+
-    (canE?'<button class="btn btn-del" onclick="delItem(\''+id+'\',\''+type+'\')">Delete</button>':'')+
-    '<button class="btn btn-ghost" onclick="closeModal()">Close</button>'+
-    (canE?'<button class="btn btn-acc" onclick="saveEdit(\''+id+'\',\''+type+'\')">Save</button>':'')+
-    '</div>';
+    '<div class="modal-actions">'+(canE?'<button class="btn btn-del" onclick="delItem(\''+id+'\',\''+type+'\')">Delete</button>':'')+'<button class="btn btn-ghost" onclick="closeModal()">Close</button>'+(canE?'<button class="btn btn-acc" onclick="saveEdit(\''+id+'\',\''+type+'\')">Save</button>':'')+'</div>';
   document.getElementById('modal-bg').classList.add('open');
 }
 
@@ -1230,15 +1103,14 @@ function saveEdit(id, type){
     ref:       document.getElementById('m-ref').value.trim(),
     cost:      document.getElementById('m-cost').value,
     apFlag:    document.getElementById('m-apflag').value,
+    efileNo:   document.getElementById('m-efile-no') ? document.getElementById('m-efile-no').value.trim() : '',
     officer:   document.getElementById('m-officer').value,
     stage:     parseInt(document.getElementById('m-stage').value)||1,
     stageNote: document.getElementById('m-snote').value.trim(),
     hold:      document.getElementById('m-hold').checked,
     remark:    document.getElementById('m-remark').value.trim()
   };
-  persistRow(arr[i]);
-  closeModal();
-  showPage(currentPage);
+  persistRow(arr[i]); closeModal(); showPage(currentPage);
 }
 
 async function delItem(id, type){
@@ -1251,58 +1123,33 @@ function closeModal(){ document.getElementById('modal-bg').classList.remove('ope
 function closeMBg(e){ if(e.target===document.getElementById('modal-bg')) closeModal(); }
 
 /* ══════════════════════════════════════════
-   REPORTING PAGE (GM only) - With Strict Alignment Fix
+   REPORTING PAGE (GM only)
    ══════════════════════════════════════════ */
 function getFlag(item){
   if(!DB.reportFlags[item.id]){
-    DB.reportFlags[item.id] = {
-      project_id:    item.id,
-      project_name:  item.project,
-      officer:       item.officer,
-      track:         item.type,
-      dir_hr:        false,
-      dir_fin:       false,
-      cmd:           false,
-      most_followed: false
-    };
+    DB.reportFlags[item.id] = { project_id:item.id, project_name:item.project, officer:item.officer, track:item.type, dir_hr:false, dir_fin:false, cmd:false, most_followed:false };
   }
   return DB.reportFlags[item.id];
 }
-
 async function saveFlag(projectId){
   const flag = DB.reportFlags[projectId];
   if(!flag) return;
   try{
     const res = await sbFetch('reporting_flags',{
-      method:'POST',
-      prefer:'resolution=merge-duplicates,return=minimal',
-      body:JSON.stringify({
-        project_id:    flag.project_id,
-        project_name:  flag.project_name,
-        officer:       flag.officer,
-        track:         flag.track,
-        dir_hr:        !!flag.dir_hr,
-        dir_fin:       !!flag.dir_fin,
-        cmd:           !!flag.cmd,
-        most_followed: !!flag.most_followed
-      }),
-      rawRes:true
+      method:'POST', prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify({ project_id:flag.project_id, project_name:flag.project_name, officer:flag.officer, track:flag.track, dir_hr:!!flag.dir_hr, dir_fin:!!flag.dir_fin, cmd:!!flag.cmd, most_followed:!!flag.most_followed }), rawRes:true
     });
     if(res.status!==200&&res.status!==201&&res.status!==204) throw new Error('HTTP '+res.status);
-  }catch(e){
-    toast('Could not save reporting flag: '+e.message, true);
-  }
+  }catch(e){ toast('Could not save reporting flag: '+e.message, true); }
 }
 
 function cbFlag(el){
-  const pid   = el.getAttribute('data-pid');
-  const field = el.getAttribute('data-field');
+  const pid = el.getAttribute('data-pid'); const field = el.getAttribute('data-field');
   if(!pid||!field) return;
   if(!DB.reportFlags[pid]){
     const allItems = [...DB.pipeline,...DB.efiles,...DB.mous];
     const p = allItems.find(x=>x.id===pid);
-    if(p) getFlag(p);
-    else  DB.reportFlags[pid] = {project_id:pid,project_name:'',officer:'',track:'',dir_hr:false,dir_fin:false,cmd:false,most_followed:false};
+    if(p) getFlag(p); else DB.reportFlags[pid] = {project_id:pid,project_name:'',officer:'',track:'',dir_hr:false,dir_fin:false,cmd:false,most_followed:false};
   }
   DB.reportFlags[pid][field] = el.checked;
   const row = document.getElementById('rep-row-'+pid);
@@ -1332,10 +1179,7 @@ function renderReportingPage(){
     if(fTrack   && p.type    !== fTrack)   return false;
     if(fOfficer && p.officer !== fOfficer) return false;
     if(fSearch  && !p.project.toLowerCase().includes(fSearch)) return false;
-    if(fFlagged){
-      const f = DB.reportFlags[p.id];
-      if(!f||(!f.dir_hr&&!f.dir_fin&&!f.cmd&&!f.most_followed)) return false;
-    }
+    if(fFlagged){ const f=DB.reportFlags[p.id]; if(!f||(!f.dir_hr&&!f.dir_fin&&!f.cmd&&!f.most_followed)) return false; }
     return true;
   });
 
@@ -1344,159 +1188,47 @@ function renderReportingPage(){
   const cmdCount = Object.values(DB.reportFlags).filter(f=>f.cmd).length;
   const mfCount  = Object.values(DB.reportFlags).filter(f=>f.most_followed).length;
 
-  let html = '<div class="page active">'+
-    '<div class="page-header">'+
-    '<div><h1>📋 Reporting Monitor</h1>'+
-    '<p>Flag projects for Director (HR) &middot; Director (Finance) &middot; CMD &middot; Most Followed &nbsp;&mdash;&nbsp; GM view only</p></div>'+
-    '<div class="page-header-actions">'+
-    '<button class="btn" onclick="exportReportingXLSX()" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700" title="Download Excel with 4 tracking sheets">&#8681; Download Excel Report</button>'+
-    '<button class="btn btn-ghost" onclick="initApp()" title="Refresh">&#8635; Refresh</button>'+
-    '</div></div>'+
-
-    '<div class="stats-row">'+
-    '<div class="stat blu"><div class="lbl">Active Projects</div><div class="val">'+allItems.length+'</div></div>'+
-    '<div class="stat" style="border-left:3px solid #1d4ed8"><div class="lbl">Dir (HR)</div><div class="val">'+hrCount+'</div></div>'+
-    '<div class="stat acc"><div class="lbl">Dir (Finance)</div><div class="val">'+finCount+'</div></div>'+
-    '<div class="stat" style="border-left:3px solid #9d174d"><div class="lbl">CMD</div><div class="val">'+cmdCount+'</div></div>'+
-    '<div class="stat" style="border-left:3px solid #6d28d9"><div class="lbl">Most Followed</div><div class="val">'+mfCount+'</div></div>'+
-    '</div>'+
-
-    '<div class="section">'+
-    '<div class="rep-filter-bar">'+
-    '<label>Track:</label>'+
-    '<select onchange="window._repFilterTrack=this.value;showPage(\'reporting\')">'+
-    '<option value="">All tracks</option>'+
-    '<option value="pipeline"'+(fTrack==='pipeline'?' selected':'')+'>📋 Pipeline</option>'+
-    '<option value="efile"'+(fTrack==='efile'?' selected':'')+'>🗂️ E-Files</option>'+
-    '<option value="mou"'+(fTrack==='mou'?' selected':'')+'>📝 MoU</option>'+
-    '</select>'+
-    '<label>Officer:</label>'+
-    '<select onchange="window._repFilterOfficer=this.value;showPage(\'reporting\')">'+
-    '<option value="">All officers</option>'+
-    OFFICERS.map(o=>'<option value="'+o.code+'"'+(fOfficer===o.code?' selected':'')+'>'+o.name+'</option>').join('')+
-    '</select>'+
-    '<input type="text" placeholder="Search project…" value="'+esc(fSearch)+'" oninput="window._repFilterSearch=this.value;showPage(\'reporting\')" style="min-width:160px">'+
-    '<label style="display:flex;align-items:center;gap:5px;cursor:pointer">'+
-    '<input type="checkbox" '+(fFlagged?'checked':'')+' onchange="window._repShowFlagged=this.checked;showPage(\'reporting\')" style="cursor:pointer">'+
-    ' Flagged only</label>'+
-    '<span style="margin-left:auto;font-size:12px;color:var(--muted)">Showing <strong>'+filtered.length+'</strong> of '+allItems.length+'</span>'+
-    '</div>'+
-
-    '<div class="tw"><table class="rep-table"><thead><tr>'+
-    '<th style="width:40px;text-align:center">S.No.</th>'+
-    '<th style="min-width:180px">Project Name</th>'+
-    '<th>Agency</th>'+
-    '<th>Reference</th>'+
-    '<th>Assigned officer</th>'+
-    '<th>Stage</th>'+
-    
-    /* Fixed Table Layout Headers */
-    '<th style="text-align:center;width:90px"><span class="rep-flag rep-flag-hr">D(HR)</span></th>'+
-    '<th style="text-align:center;width:90px"><span class="rep-flag rep-flag-fin">D(Fin)</span></th>'+
-    '<th style="text-align:center;width:90px"><span class="rep-flag rep-flag-cmd">CMD</span></th>'+
-    '<th style="text-align:center;width:90px"><span class="rep-flag" style="background:#ede9fe;color:#6d28d9">Most Followed</span></th>'+
-    '</tr></thead><tbody>'+
-    
-    (filtered.length===0
-      ? '<tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">No projects match the current filter.</td></tr>'
-      : filtered.map((p,i)=>{
-          const flag   = getFlag(p);
-          const offObj = OFFICERS.find(o=>o.code===p.officer);
-          const offName= offObj ? offObj.name : (p.officer||'—');
-          const stgLbl = getStageLabel(p.type, p.stage);
-          return '<tr id="rep-row-'+p.id+'">'+
-            '<td style="color:var(--muted);font-size:11px;text-align:center">'+(i+1)+'</td>'+
-            '<td class="pname" style="max-width:240px">'+esc(p.project)+'</td>'+
-            '<td class="agt">'+(esc(p.agency)||'&mdash;')+'</td>'+
-            '<td style="font-size:11px;color:var(--muted)">'+(esc(p.ref)||'&mdash;')+'</td>'+
-            '<td><div style="display:flex;align-items:center;gap:6px">'+
-              av(p.officer)+'<span style="font-size:11px">'+esc(offName)+'</span></div></td>'+
-            '<td><span class="badge '+getStageBadgeClass(p.type,p.stage)+'">'+stgLbl+'</span></td>'+
-            
-            /* Fixed Checkbox Cells aligning perfectly with headers */
-            '<td style="text-align:center; vertical-align:middle;">'+
-              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_hr" '+(flag.dir_hr?'checked':'')+
-              ' onchange="cbFlag(this)" title="Report to Director (HR)">'+
-            '</td>'+
-            '<td style="text-align:center; vertical-align:middle;">'+
-              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_fin" '+(flag.dir_fin?'checked':'')+
-              ' onchange="cbFlag(this)" title="Report to Director (Finance)">'+
-            '</td>'+
-            '<td style="text-align:center; vertical-align:middle;">'+
-              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="cmd" '+(flag.cmd?'checked':'')+
-              ' onchange="cbFlag(this)" title="Report to CMD Sir">'+
-            '</td>'+
-            '<td style="text-align:center; vertical-align:middle;">'+
-              '<input type="checkbox" class="rep-cb" style="accent-color:#6d28d9" data-pid="'+p.id+'" data-field="most_followed" '+(flag.most_followed?'checked':'')+
-              ' onchange="cbFlag(this)" title="Mark as Most Followed">'+
-            '</td>'+
-            '</tr>';
-        }).join('')
-    )+
-    '</tbody></table></div>'+
-    '<div style="padding:10px 14px;border-top:1px solid var(--border);background:#fafafa;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted)">'+
-    '<span>&#9745; = Track in Excel Export</span>'+
-    '<span>Changes save automatically.</span>'+
-    '</div>'+
-    '</div></div>';
-
-  return html;
+  return '<div class="page active">'+
+    '<div class="page-header"><div><h1>📋 Reporting Monitor</h1><p>Flag projects for Director (HR) &middot; Director (Finance) &middot; CMD &middot; Most Followed &nbsp;&mdash;&nbsp; GM view only</p></div>'+
+    '<div class="page-header-actions"><button class="btn" onclick="exportReportingXLSX()" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700">&#8681; Download Excel Report</button><button class="btn btn-ghost" onclick="initApp()">&#8635; Refresh</button></div></div>'+
+    '<div class="stats-row"><div class="stat blu"><div class="lbl">Active Projects</div><div class="val">'+allItems.length+'</div></div><div class="stat" style="border-left:3px solid #1d4ed8"><div class="lbl">Dir (HR)</div><div class="val">'+hrCount+'</div></div><div class="stat acc"><div class="lbl">Dir (Finance)</div><div class="val">'+finCount+'</div></div><div class="stat" style="border-left:3px solid #9d174d"><div class="lbl">CMD</div><div class="val">'+cmdCount+'</div></div><div class="stat" style="border-left:3px solid #6d28d9"><div class="lbl">Most Followed</div><div class="val">'+mfCount+'</div></div></div>'+
+    '<div class="section"><div class="rep-filter-bar"><label>Track:</label><select onchange="window._repFilterTrack=this.value;showPage(\'reporting\')"><option value="">All tracks</option><option value="pipeline"'+(fTrack==='pipeline'?' selected':'')+'>📋 Pipeline</option><option value="efile"'+(fTrack==='efile'?' selected':'')+'>🗂️ E-Files</option><option value="mou"'+(fTrack==='mou'?' selected':'')+'>📝 MoU</option></select><label>Officer:</label><select onchange="window._repFilterOfficer=this.value;showPage(\'reporting\')"><option value="">All officers</option>'+OFFICERS.map(o=>'<option value="'+o.code+'"'+(fOfficer===o.code?' selected':'')+'>'+o.name+'</option>').join('')+'</select><input type="text" placeholder="Search project…" value="'+esc(fSearch)+'" oninput="window._repFilterSearch=this.value;showPage(\'reporting\')" style="min-width:160px"><label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" '+(fFlagged?'checked':'')+' onchange="window._repShowFlagged=this.checked;showPage(\'reporting\')" style="cursor:pointer"> Flagged only</label><span style="margin-left:auto;font-size:12px;color:var(--muted)">Showing <strong>'+filtered.length+'</strong> of '+allItems.length+'</span></div>'+
+    '<div class="tw"><table class="rep-table"><thead><tr><th style="width:40px;text-align:center">S.No.</th><th style="min-width:180px">Project Name</th><th>Agency</th><th>Reference</th><th>Assigned officer</th><th>Stage</th><th style="text-align:center;width:90px"><span class="rep-flag rep-flag-hr">D(HR)</span></th><th style="text-align:center;width:90px"><span class="rep-flag rep-flag-fin">D(Fin)</span></th><th style="text-align:center;width:90px"><span class="rep-flag rep-flag-cmd">CMD</span></th><th style="text-align:center;width:90px"><span class="rep-flag" style="background:#ede9fe;color:#6d28d9">Most Followed</span></th></tr></thead><tbody>'+
+    (filtered.length===0 ? '<tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">No projects match the current filter.</td></tr>' : filtered.map((p,i)=>{
+      const flag = getFlag(p); const offObj = OFFICERS.find(o=>o.code===p.officer); const offName= offObj ? offObj.name : (p.officer||'—'); const stgLbl = getStageLabel(p.type, p.stage);
+      return '<tr id="rep-row-'+p.id+'"><td style="color:var(--muted);font-size:11px;text-align:center">'+(i+1)+'</td><td class="pname" style="max-width:240px">'+esc(p.project)+'</td><td class="agt">'+(esc(p.agency)||'&mdash;')+'</td><td style="font-size:11px;color:var(--muted)">'+(esc(p.ref)||'&mdash;')+'</td><td><div style="display:flex;align-items:center;gap:6px">'+av(p.officer)+'<span style="font-size:11px">'+esc(offName)+'</span></div></td><td><span class="badge '+getStageBadgeClass(p.type,p.stage)+'">'+stgLbl+'</span></td><td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_hr" '+(flag.dir_hr?'checked':'')+' onchange="cbFlag(this)" title="Report to Director (HR)"></td><td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_fin" '+(flag.dir_fin?'checked':'')+' onchange="cbFlag(this)" title="Report to Director (Finance)"></td><td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="cmd" '+(flag.cmd?'checked':'')+' onchange="cbFlag(this)" title="Report to CMD Sir"></td><td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="rep-cb" style="accent-color:#6d28d9" data-pid="'+p.id+'" data-field="most_followed" '+(flag.most_followed?'checked':'')+' onchange="cbFlag(this)" title="Mark as Most Followed"></td></tr>';
+    }).join(''))+
+    '</tbody></table></div></div></div>';
 }
 
 /* ══════════════════════════════════════════
-   EXCEL EXPORT (4 SHEETS, SORTED)
+   EXCEL EXPORT 
    ══════════════════════════════════════════ */
 function withXLSX(cb){
   if(window.XLSX){ cb(window.XLSX); return; }
-  toast('Preparing Excel export…');
-  const s=document.createElement('script');
+  toast('Preparing Excel export…'); const s=document.createElement('script');
   s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-  s.onload=()=>cb(window.XLSX);
-  s.onerror=()=>toast('Could not load Excel library. Check your connection.',true);
+  s.onload=()=>cb(window.XLSX); s.onerror=()=>toast('Could not load Excel library.',true);
   document.head.appendChild(s);
 }
 
 function makeSheet(XLSX, heads, rows){
-  const data=[heads,...rows];
-  const ws=XLSX.utils.aoa_to_sheet(data);
-  ws['!cols']=heads.map((h,ci)=>{
-    const max=data.reduce((m,r)=>Math.max(m,String(r[ci]||'').length),0);
-    return {wch:Math.min(Math.max(max,h.length)+2,60)};
-  });
+  const data=[heads,...rows]; const ws=XLSX.utils.aoa_to_sheet(data);
+  ws['!cols']=heads.map((h,ci)=>{ const max=data.reduce((m,r)=>Math.max(m,String(r[ci]||'').length),0); return {wch:Math.min(Math.max(max,h.length)+2,60)}; });
   return ws;
 }
 
 function exportReportingXLSX(){
   withXLSX(XLSX=>{
     const allItems = [...DB.pipeline, ...DB.efiles, ...DB.mous].filter(p=>!p.hold);
-
-    const heads = ['S.No.', 'Project Name', 'Agency', 'Cost', 'Reference', 'Assigned officer', 'Current Stage', 'Remarks'];
+    const heads = ['S.No.', 'Project Name', 'Agency', 'Cost', 'Reference', 'E-File No.', 'Assigned officer', 'Current Stage', 'Remarks'];
 
     function buildRows(field){
-      let rows = allItems.filter(p=>{
-        const f = DB.reportFlags[p.id];
-        return f && f[field];
-      });
-
-      /* Sort rows so that "Most Followed" projects appear at the top */
-      rows.sort((a, b) => {
-        const fA = DB.reportFlags[a.id]?.most_followed ? 1 : 0;
-        const fB = DB.reportFlags[b.id]?.most_followed ? 1 : 0;
-        return fB - fA; 
-      });
-
+      let rows = allItems.filter(p=>{ const f = DB.reportFlags[p.id]; return f && f[field]; });
+      rows.sort((a, b) => { const fA=DB.reportFlags[a.id]?.most_followed?1:0; const fB=DB.reportFlags[b.id]?.most_followed?1:0; return fB - fA; });
       return rows.map((p,i)=>{
         const offObj = OFFICERS.find(o=>o.code===p.officer);
-        return [
-          i+1,
-          p.project||'',
-          p.agency||'',
-          p.cost ? '₹' + p.cost + 'L' : '',
-          p.ref||'',
-          offObj ? offObj.name : (p.officer||''),
-          getStageLabel(p.type, p.stage),
-          p.remark||''
-        ];
+        return [ i+1, p.project||'', p.agency||'', p.cost?'₹'+p.cost+'L':'', p.ref||'', p.efileNo||'', offObj?offObj.name:(p.officer||''), getStageLabel(p.type,p.stage), p.remark||'' ];
       });
     }
 
@@ -1510,22 +1242,14 @@ function exportReportingXLSX(){
   });
 }
 
-function officerLabel(code){
-  const o=OFFICERS.find(x=>x.code===code);
-  return o?o.name+' ('+o.code+')':code||'Unassigned';
-}
+function officerLabel(code){ const o=OFFICERS.find(x=>x.code===code); return o?o.name+' ('+o.code+')':code||'Unassigned'; }
 
 function exportOfficerXLSX(code){
-  const officer=OFFICERS.find(o=>o.code===code);
-  const label=officer?officer.name:code;
+  const officer=OFFICERS.find(o=>o.code===code); const label=officer?officer.name:code;
   withXLSX(XLSX=>{
-    const {pipeline,efiles,mous}=getOP(code);
-    const wb=XLSX.utils.book_new();
-    const baseH=['Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
-    const toRows=(arr,trackId)=>arr.map(p=>[
-      p.project||'',p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',
-      getStageLabel(trackId,p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||''
-    ]);
+    const {pipeline,efiles,mous}=getOP(code); const wb=XLSX.utils.book_new();
+    const baseH=['Project','Agency','Reference','E-File No.','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
+    const toRows=(arr,trackId)=>arr.map(p=>[ p.project||'',p.agency||'',p.ref||'',p.efileNo||'',p.cost||'',p.apFlag||'',getStageLabel(trackId,p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||'' ]);
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(pipeline,'pipeline')), 'Pipeline');
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(efiles,'efile')),      'E-Files');
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(mous,'mou')),          'MoU');
@@ -1537,11 +1261,8 @@ function exportOfficerXLSX(code){
 function exportAllXLSX(){
   withXLSX(XLSX=>{
     const wb=XLSX.utils.book_new();
-    const baseH=['Officer','Project','Agency','Reference','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
-    const toRows=(arr,trackId)=>arr.map(p=>[
-      officerLabel(p.officer),p.project||'',p.agency||'',p.ref||'',p.cost||'',p.apFlag||'',
-      getStageLabel(trackId,p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||''
-    ]);
+    const baseH=['Officer','Project','Agency','Reference','E-File No.','Cost (Lakhs)','AP Flag','Stage','Stage Note','On Hold','Remark'];
+    const toRows=(arr,trackId)=>arr.map(p=>[ officerLabel(p.officer),p.project||'',p.agency||'',p.ref||'',p.efileNo||'',p.cost||'',p.apFlag||'',getStageLabel(trackId,p.stage),p.stageNote||'',p.hold?'Yes':'No',p.remark||'' ]);
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(DB.pipeline,'pipeline')), 'Pipeline');
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(DB.efiles,'efile')),      'E-Files');
     XLSX.utils.book_append_sheet(wb, makeSheet(XLSX,baseH,toRows(DB.mous,'mou')),          'MoU');
@@ -1550,9 +1271,6 @@ function exportAllXLSX(){
   });
 }
 
-/* ══════════════════════════════════════════
-   INIT
-   ══════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', ()=>{ tryRestoreSession(); });
 </script>
 </body>
