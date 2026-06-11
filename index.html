@@ -241,6 +241,27 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
 
 /* ── ADD TRACK BUTTONS ───────────────────────── */
 .add-track-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+
+/* ── REPORTING PAGE ──────────────────────────────────────────── */
+.rep-table th,.rep-table td{padding:9px 11px;font-size:12px;vertical-align:middle}
+.rep-table thead th{background:#f1f5f9;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;position:sticky;top:0;z-index:2}
+.rep-table tr:hover td{background:#f8f9ff}
+.rep-cb-wrap{display:flex;align-items:center;justify-content:center;gap:0}
+.rep-cb{width:18px;height:18px;cursor:pointer;accent-color:var(--coal);flex-shrink:0}
+.rep-cb:disabled{cursor:not-allowed;opacity:0.4}
+.rep-flag{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700}
+.rep-flag-hr {background:#dbeafe;color:#1d4ed8}
+.rep-flag-fin{background:#fef3c7;color:#92400e}
+.rep-flag-cmd{background:#fce7f3;color:#9d174d}
+.rep-saving{opacity:0.5;pointer-events:none}
+.track-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700}
+.track-tag-pipeline{background:var(--track-pipe-bg);color:var(--track-pipe)}
+.track-tag-efile   {background:var(--track-efile-bg);color:var(--track-efile)}
+.track-tag-mou     {background:var(--track-mou-bg);color:var(--track-mou)}
+.rep-filter-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);background:#fafafa}
+.rep-filter-bar label{font-size:11px;font-weight:600;color:var(--muted)}
+.rep-filter-bar select,.rep-filter-bar input{height:30px;padding:0 8px;border:1px solid var(--border);border-radius:var(--r);font-size:12px;color:var(--text);background:var(--white)}
+.rep-count-badge{background:var(--coal);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;margin-left:4px}
 </style>
 </head>
 <body>
@@ -419,7 +440,7 @@ const DOT = {
 let currentUser  = null;
 let sessionToken = null;
 let currentPage  = 'summary';
-let DB           = { pipeline: [], efiles: [], mous: [] };
+let DB           = { pipeline: [], efiles: [], mous: [], reportFlags: {} };
 let refreshTimer = null;
 let countdown    = REFRESH_SEC;
 let _missingTables = []; // tracks tables that returned 404/400
@@ -539,18 +560,23 @@ async function loadData(silent){
   if(!silent) setSyncStatus('syncing','Loading data&hellip;');
   try{
     /* Use allSettled so a missing/broken table never blocks the other two */
-    const [pRes, eRes, mRes] = await Promise.allSettled([
+    const [pRes, eRes, mRes, rfRes] = await Promise.allSettled([
       safeFetch('pipeline_projects','order=id.asc'),
       safeFetch('efile_projects',   'order=id.asc'),
-      safeFetch('mou_projects',     'order=id.asc')
+      safeFetch('mou_projects',     'order=id.asc'),
+      safeFetch('reporting_flags',  'order=project_id.asc')
     ]);
 
     /* Only update DB arrays that succeeded */
-    if(pRes.status==='fulfilled') DB.pipeline = pRes.value.map(mapPipeline);
-    if(eRes.status==='fulfilled') DB.efiles   = eRes.value.map(mapEfile);
-    if(mRes.status==='fulfilled') DB.mous     = mRes.value.map(mapMou);
+    if(pRes.status==='fulfilled')  DB.pipeline = pRes.value.map(mapPipeline);
+    if(eRes.status==='fulfilled')  DB.efiles   = eRes.value.map(mapEfile);
+    if(mRes.status==='fulfilled')  DB.mous     = mRes.value.map(mapMou);
+    if(rfRes.status==='fulfilled') {
+      DB.reportFlags = {};
+      rfRes.value.forEach(r => { DB.reportFlags[r.project_id] = r; });
+    }
 
-    const anyNetworkFail = [pRes,eRes,mRes].some(r=>
+    const anyNetworkFail = [pRes,eRes,mRes,rfRes].some(r=>
       r.status==='rejected' && r.reason && !String(r.reason.message).startsWith('HTTP 4')
     );
 
@@ -777,6 +803,14 @@ function renderNav(){
       '<span class="nav-dot" style="background:'+DOT[o.code]+'"></span>'+o.code+
       '<span class="nav-count">'+cnt+'</span></div>';
   });
+  /* Reporting tab — GM only */
+  if(currentUser==='GM'){
+    const flagged = Object.values(DB.reportFlags).filter(f=>f.dir_hr||f.dir_fin||f.cmd).length;
+    h+='<div class="nav-link '+(currentPage==='reporting'?'active':'')+'" onclick="showPage(\'reporting\')">'+
+      '<span class="nav-dot" style="background:#e8a020"></span>📋 Reporting'+
+      (flagged?'<span class="nav-count">'+flagged+'</span>':'')+
+      '</div>';
+  }
   document.getElementById('nav-links').innerHTML=h;
 }
 
@@ -784,8 +818,14 @@ function renderNav(){
    ROUTING
    ══════════════════════════════════════════ */
 function showPage(page){
+  /* Reporting page is GM-only */
+  if(page==='reporting' && currentUser!=='GM'){ page='summary'; }
   currentPage=page; renderNav();
-  document.getElementById('pages').innerHTML=page==='summary'?renderSummary():renderOfficerPage(page);
+  let html;
+  if(page==='summary')        html = renderSummary();
+  else if(page==='reporting') html = renderReportingPage();
+  else                        html = renderOfficerPage(page);
+  document.getElementById('pages').innerHTML = html;
 }
 
 /* ══════════════════════════════════════════
@@ -879,7 +919,6 @@ function renderDbSetupNotice(){
   const sql = `-- Run in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
 -- ─────────────────────────────────────────────────────
 -- STEP 1: Add missing columns to efile_projects
--- (safe — skips if columns already present)
 ALTER TABLE efile_projects
   ADD COLUMN IF NOT EXISTS stage      int4    DEFAULT 1,
   ADD COLUMN IF NOT EXISTS stage_note text    DEFAULT '',
@@ -888,7 +927,6 @@ ALTER TABLE efile_projects
 
 -- ─────────────────────────────────────────────────────
 -- STEP 2: Create mou_projects table
--- (safe — skips if already exists)
 CREATE TABLE IF NOT EXISTS mou_projects (
   id         text PRIMARY KEY,
   officer    text    DEFAULT '',
@@ -902,15 +940,28 @@ CREATE TABLE IF NOT EXISTS mou_projects (
   remark     text    DEFAULT '',
   created_at timestamptz DEFAULT now()
 );
-
--- Enable Row Level Security (public read/write for anon key)
 ALTER TABLE mou_projects ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies WHERE tablename='mou_projects' AND policyname='anon_all'
-  ) THEN
-    CREATE POLICY anon_all ON mou_projects FOR ALL USING (true) WITH CHECK (true);
-  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='mou_projects' AND policyname='anon_all')
+  THEN CREATE POLICY anon_all ON mou_projects FOR ALL USING (true) WITH CHECK (true); END IF;
+END $$;
+
+-- ─────────────────────────────────────────────────────
+-- STEP 3: Create reporting_flags table
+CREATE TABLE IF NOT EXISTS reporting_flags (
+  project_id   text PRIMARY KEY,
+  project_name text    DEFAULT '',
+  officer      text    DEFAULT '',
+  track        text    DEFAULT '',
+  dir_hr       boolean DEFAULT false,
+  dir_fin      boolean DEFAULT false,
+  cmd          boolean DEFAULT false,
+  updated_at   timestamptz DEFAULT now()
+);
+ALTER TABLE reporting_flags ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='reporting_flags' AND policyname='anon_all')
+  THEN CREATE POLICY anon_all ON reporting_flags FOR ALL USING (true) WITH CHECK (true); END IF;
 END $$;`;
 
   return '<div class="section" style="border-top:3px solid var(--amber)">'+
@@ -1337,6 +1388,263 @@ async function delItem(id, type){
 
 function closeModal(){ document.getElementById('modal-bg').classList.remove('open'); }
 function closeMBg(e){ if(e.target===document.getElementById('modal-bg')) closeModal(); }
+
+/* ══════════════════════════════════════════
+   REPORTING PAGE  (GM only)
+   ══════════════════════════════════════════ */
+
+/* Get or create a flag record for a project */
+function getFlag(item){
+  if(!DB.reportFlags[item.id]){
+    DB.reportFlags[item.id] = {
+      project_id:   item.id,
+      project_name: item.project,
+      officer:      item.officer,
+      track:        item.type,
+      dir_hr:       false,
+      dir_fin:      false,
+      cmd:          false
+    };
+  }
+  return DB.reportFlags[item.id];
+}
+
+async function saveFlag(projectId){
+  const flag = DB.reportFlags[projectId];
+  if(!flag) return;
+  try{
+    const res = await sbFetch('reporting_flags',{
+      method:'POST',
+      prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify({
+        project_id:   flag.project_id,
+        project_name: flag.project_name,
+        officer:      flag.officer,
+        track:        flag.track,
+        dir_hr:       !!flag.dir_hr,
+        dir_fin:      !!flag.dir_fin,
+        cmd:          !!flag.cmd
+      }),
+      rawRes:true
+    });
+    if(res.status!==200&&res.status!==201&&res.status!==204){
+      const txt = await res.text();
+      throw new Error('HTTP '+res.status+': '+txt);
+    }
+  }catch(e){
+    toast('Could not save reporting flag: '+e.message, true);
+    console.error('saveFlag error:',e);
+  }
+}
+
+function toggleFlag(projectId, field){
+  const flag = DB.reportFlags[projectId];
+  if(!flag) return;
+  flag[field] = !flag[field];
+  /* Visual feedback on the row; save async */
+  const row = document.getElementById('rep-row-'+projectId);
+  if(row) row.classList.add('rep-saving');
+  saveFlag(projectId).finally(()=>{
+    const r2 = document.getElementById('rep-row-'+projectId);
+    if(r2) r2.classList.remove('rep-saving');
+    renderNav();
+  });
+}
+
+/* Called by checkbox onchange — reads data-pid and data-field attributes */
+function cbFlag(el){
+  const pid   = el.getAttribute('data-pid');
+  const field = el.getAttribute('data-field');
+  if(!pid||!field) return;
+  /* Ensure flag object exists */
+  if(!DB.reportFlags[pid]){
+    /* Try to find the project to seed it */
+    const allItems = [...DB.pipeline,...DB.efiles,...DB.mous];
+    const p = allItems.find(x=>x.id===pid);
+    if(p) getFlag(p);
+    else  DB.reportFlags[pid] = {project_id:pid,project_name:'',officer:'',track:'',dir_hr:false,dir_fin:false,cmd:false};
+  }
+  DB.reportFlags[pid][field] = el.checked;
+  const row = document.getElementById('rep-row-'+pid);
+  if(row) row.classList.add('rep-saving');
+  saveFlag(pid).finally(()=>{
+    const r2 = document.getElementById('rep-row-'+pid);
+    if(r2) r2.classList.remove('rep-saving');
+    renderNav();
+  });
+}
+
+function renderReportingPage(){
+  /* Build master list: all projects across all tracks */
+  const allItems = [
+    ...DB.pipeline.map(p=>({...p, trackLabel:TRACKS.pipeline.label, trackIcon:TRACKS.pipeline.icon})),
+    ...DB.efiles.map(p=>({...p,  trackLabel:TRACKS.efile.label,    trackIcon:TRACKS.efile.icon})),
+    ...DB.mous.map(p=>({...p,    trackLabel:TRACKS.mou.label,      trackIcon:TRACKS.mou.icon}))
+  ].filter(p=>!p.hold);  /* Exclude held items from reporting by default */
+
+  /* Ensure every item has a flag entry */
+  allItems.forEach(p=>getFlag(p));
+
+  /* Filter state from DOM (rebuilt each render so read from URL-like state) */
+  const fTrack   = window._repFilterTrack  || '';
+  const fOfficer = window._repFilterOfficer|| '';
+  const fSearch  = (window._repFilterSearch||'').toLowerCase();
+  const fFlagged = window._repShowFlagged  || false;
+
+  let filtered = allItems.filter(p=>{
+    if(fTrack   && p.type    !== fTrack)   return false;
+    if(fOfficer && p.officer !== fOfficer)  return false;
+    if(fSearch  && !p.project.toLowerCase().includes(fSearch)) return false;
+    if(fFlagged){
+      const f = DB.reportFlags[p.id];
+      if(!f||(!f.dir_hr&&!f.dir_fin&&!f.cmd)) return false;
+    }
+    return true;
+  });
+
+  /* Counts for summary badges */
+  const hrCount  = Object.values(DB.reportFlags).filter(f=>f.dir_hr).length;
+  const finCount = Object.values(DB.reportFlags).filter(f=>f.dir_fin).length;
+  const cmdCount = Object.values(DB.reportFlags).filter(f=>f.cmd).length;
+
+  let html = '<div class="page active">'+
+    '<div class="page-header">'+
+    '<div><h1>📋 Reporting Monitor</h1>'+
+    '<p>Flag projects for Director (HR) &middot; Director (Finance) &middot; CMD &nbsp;&mdash;&nbsp; GM view only &middot; FY 2026-27</p></div>'+
+    '<div class="page-header-actions">'+
+    '<button class="btn" onclick="exportReportingXLSX()" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700" title="Download reporting Excel with 3 authority sheets">&#8681; Excel Report</button>'+
+    '<button class="btn btn-ghost" onclick="initApp()" title="Refresh">&#8635; Refresh</button>'+
+    '</div></div>'+
+
+    /* Summary stat pills */
+    '<div class="stats-row">'+
+    '<div class="stat blu"><div class="lbl">Total Projects</div><div class="val">'+allItems.length+'</div><div class="sub">active across all tracks</div></div>'+
+    '<div class="stat" style="border-left:3px solid #1d4ed8"><div class="lbl">Dir (HR)</div><div class="val">'+hrCount+'</div><div class="sub">projects flagged</div></div>'+
+    '<div class="stat acc"><div class="lbl">Dir (Finance)</div><div class="val">'+finCount+'</div><div class="sub">projects flagged</div></div>'+
+    '<div class="stat" style="border-left:3px solid #9d174d"><div class="lbl">CMD</div><div class="val">'+cmdCount+'</div><div class="sub">projects flagged</div></div>'+
+    '</div>'+
+
+    /* Filter bar */
+    '<div class="section">'+
+    '<div class="rep-filter-bar">'+
+    '<label>Track:</label>'+
+    '<select onchange="window._repFilterTrack=this.value;showPage(\'reporting\')">'+
+    '<option value="">All tracks</option>'+
+    '<option value="pipeline"'+(fTrack==='pipeline'?' selected':'')+'>📋 Pipeline</option>'+
+    '<option value="efile"'+(fTrack==='efile'?' selected':'')+'>🗂️ E-Files</option>'+
+    '<option value="mou"'+(fTrack==='mou'?' selected':'')+'>📝 MoU</option>'+
+    '</select>'+
+    '<label>Officer:</label>'+
+    '<select onchange="window._repFilterOfficer=this.value;showPage(\'reporting\')">'+
+    '<option value="">All officers</option>'+
+    OFFICERS.map(o=>'<option value="'+o.code+'"'+(fOfficer===o.code?' selected':'')+'>'+o.name+'</option>').join('')+
+    '</select>'+
+    '<input type="text" placeholder="Search project…" value="'+esc(fSearch)+'" oninput="window._repFilterSearch=this.value;showPage(\'reporting\')" style="min-width:160px">'+
+    '<label style="display:flex;align-items:center;gap:5px;cursor:pointer">'+
+    '<input type="checkbox" '+(fFlagged?'checked':'')+' onchange="window._repShowFlagged=this.checked;showPage(\'reporting\')" style="cursor:pointer">'+
+    ' Flagged only</label>'+
+    '<span style="margin-left:auto;font-size:12px;color:var(--muted)">Showing <strong>'+filtered.length+'</strong> of '+allItems.length+'</span>'+
+    '</div>'+
+
+    /* Main table */
+    '<div class="tw"><table class="rep-table"><thead><tr>'+
+    '<th style="width:44px">S.No.</th>'+
+    '<th>Project Name</th>'+
+    '<th>Officer</th>'+
+    '<th>Track</th>'+
+    '<th>Stage</th>'+
+    '<th style="text-align:center;min-width:80px"><span class="rep-flag rep-flag-hr">D(HR)</span></th>'+
+    '<th style="text-align:center;min-width:80px"><span class="rep-flag rep-flag-fin">D(Fin)</span></th>'+
+    '<th style="text-align:center;min-width:80px"><span class="rep-flag rep-flag-cmd">CMD</span></th>'+
+    '</tr></thead><tbody>'+
+    (filtered.length===0
+      ? '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--muted)">No projects match the current filter.</td></tr>'
+      : filtered.map((p,i)=>{
+          const flag   = getFlag(p);
+          const offObj = OFFICERS.find(o=>o.code===p.officer);
+          const offName= offObj ? offObj.name : (p.officer||'—');
+          const stgLbl = getStageLabel(p.type, p.stage);
+          return '<tr id="rep-row-'+p.id+'">'+
+            '<td style="color:var(--muted);font-size:11px;text-align:center">'+(i+1)+'</td>'+
+            '<td class="pname" style="max-width:260px">'+esc(p.project)+'</td>'+
+            '<td><div style="display:flex;align-items:center;gap:6px">'+
+              av(p.officer)+'<span style="font-size:11px">'+esc(offName)+'</span></div></td>'+
+            '<td><span class="track-tag track-tag-'+p.type+'">'+p.trackIcon+' '+p.trackLabel+'</span></td>'+
+            '<td><span class="badge '+getStageBadgeClass(p.type,p.stage)+'">'+stgLbl+'</span></td>'+
+            /* D(HR) checkbox */
+            '<td class="rep-cb-wrap">'+
+              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_hr" '+(flag.dir_hr?'checked':'')+
+              ' onchange="cbFlag(this)" title="Report to Director (HR)">'+
+            '</td>'+
+            /* D(Fin) checkbox */
+            '<td class="rep-cb-wrap">'+
+              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="dir_fin" '+(flag.dir_fin?'checked':'')+
+              ' onchange="cbFlag(this)" title="Report to Director (Finance)">'+
+            '</td>'+
+            /* CMD checkbox */
+            '<td class="rep-cb-wrap">'+
+              '<input type="checkbox" class="rep-cb" data-pid="'+p.id+'" data-field="cmd" '+(flag.cmd?'checked':'')+
+              ' onchange="cbFlag(this)" title="Report to CMD Sir">'+
+            '</td>'+
+            '</tr>';
+        }).join('')
+    )+
+    '</tbody></table></div>'+
+
+    /* Legend */
+    '<div style="padding:10px 14px;border-top:1px solid var(--border);background:#fafafa;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted)">'+
+    '<span>&#9745; = Report to this authority</span>'+
+    '<span>&#9744; = Not required</span>'+
+    '<span>Changes save automatically.</span>'+
+    '</div>'+
+    '</div>'+  /* end .section */
+    '</div>';  /* end .page */
+
+  return html;
+}
+
+/* ══════════════════════════════════════════
+   REPORTING EXCEL EXPORT
+   3 sheets: D(HR) / D(Finance) / CMD
+   Each sheet lists only flagged projects for that authority
+   ══════════════════════════════════════════ */
+function exportReportingXLSX(){
+  withXLSX(XLSX=>{
+    const allItems = [
+      ...DB.pipeline.map(p=>({...p, trackLabel:TRACKS.pipeline.label})),
+      ...DB.efiles.map(p=>({...p,  trackLabel:TRACKS.efile.label})),
+      ...DB.mous.map(p=>({...p,    trackLabel:TRACKS.mou.label}))
+    ];
+
+    const heads = ['S.No.','Project Name','Officer','Track','Current Stage','On Hold','Remarks'];
+
+    function buildRows(field){
+      const rows = allItems.filter(p=>{
+        const f = DB.reportFlags[p.id];
+        return f && f[field];
+      });
+      return rows.map((p,i)=>{
+        const offObj = OFFICERS.find(o=>o.code===p.officer);
+        return [
+          i+1,
+          p.project||'',
+          offObj ? offObj.name+' ('+offObj.code+')' : (p.officer||''),
+          p.trackLabel,
+          getStageLabel(p.type, p.stage),
+          p.hold?'Yes':'No',
+          p.remark||''
+        ];
+      });
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX, heads, buildRows('dir_hr')),  'Director (HR)');
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX, heads, buildRows('dir_fin')), 'Director (Finance)');
+    XLSX.utils.book_append_sheet(wb, makeSheet(XLSX, heads, buildRows('cmd')),     'CMD');
+    XLSX.writeFile(wb, 'CCL_CSR_Reporting_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Reporting Excel downloaded — 3 authority sheets');
+  });
+}
 
 /* ══════════════════════════════════════════
    EXCEL EXPORT
