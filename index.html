@@ -627,25 +627,30 @@ async function persistRow(item){
   try{
     const table = getTable(item.type);
     if(!table){ toast('Unknown record type.',true); return; }
-    const row = {
+
+    /* Build row with only columns that exist in each table.
+       ap_flag only exists on pipeline_projects currently.
+       efile_projects and mou_projects need the SQL migration first. */
+    const base = {
       id:item.id, officer:item.officer||'', project:item.project||'',
       agency:item.agency||'', ref:item.ref||'', cost:item.cost||'',
       stage:item.stage||1, stage_note:item.stageNote||'',
-      hold:item.hold||false, remark:item.remark||'',
-      ap_flag:item.apFlag||''
+      hold:!!item.hold, remark:item.remark||''
     };
+    if(item.type==='pipeline') base.ap_flag = item.apFlag||'';
+
     /* Use upsert (POST with merge-duplicates + return=minimal) */
     const res = await sbFetch(table, {
       method:'POST',
       prefer:'resolution=merge-duplicates,return=minimal',
-      body:JSON.stringify(row),
+      body:JSON.stringify(base),
       rawRes:true
     });
     if(res.status!==200&&res.status!==201&&res.status!==204){
       const txt = await res.text();
       throw new Error('HTTP '+res.status+': '+txt);
     }
-    /* Audit log — fire-and-forget, do not let failure block UI */
+    /* Audit log — fire-and-forget */
     sbInsert('audit_log',{officer:currentUser, action:'SAVE',
       rec_type:item.type, record_id:item.id, project:item.project||''
     }).catch(()=>{});
@@ -872,31 +877,41 @@ function renderDbSetupNotice(){
   if(_missingTables.length===0) return '';
 
   const sql = `-- Run in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
--- 1. Add missing columns to efile_projects (safe — skips if already present)
+-- ─────────────────────────────────────────────────────
+-- STEP 1: Add missing columns to efile_projects
+-- (safe — skips if columns already present)
 ALTER TABLE efile_projects
   ADD COLUMN IF NOT EXISTS stage      int4    DEFAULT 1,
   ADD COLUMN IF NOT EXISTS stage_note text    DEFAULT '',
   ADD COLUMN IF NOT EXISTS hold       boolean DEFAULT false,
-  ADD COLUMN IF NOT EXISTS ap_flag    text    DEFAULT '';
+  ADD COLUMN IF NOT EXISTS remark     text    DEFAULT '';
 
--- 2. Create mou_projects table (safe — skips if already exists)
+-- ─────────────────────────────────────────────────────
+-- STEP 2: Create mou_projects table
+-- (safe — skips if already exists)
 CREATE TABLE IF NOT EXISTS mou_projects (
   id         text PRIMARY KEY,
-  officer    text DEFAULT '',
-  project    text DEFAULT '',
-  agency     text DEFAULT '',
-  ref        text DEFAULT '',
-  cost       text DEFAULT '',
+  officer    text    DEFAULT '',
+  project    text    DEFAULT '',
+  agency     text    DEFAULT '',
+  ref        text    DEFAULT '',
+  cost       text    DEFAULT '',
   stage      int4    DEFAULT 1,
   stage_note text    DEFAULT '',
   hold       boolean DEFAULT false,
   remark     text    DEFAULT '',
-  ap_flag    text    DEFAULT '',
   created_at timestamptz DEFAULT now()
 );
+
 -- Enable Row Level Security (public read/write for anon key)
 ALTER TABLE mou_projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY IF NOT EXISTS "anon_all" ON mou_projects FOR ALL USING (true) WITH CHECK (true);`;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename='mou_projects' AND policyname='anon_all'
+  ) THEN
+    CREATE POLICY anon_all ON mou_projects FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+END $$;`;
 
   return '<div class="section" style="border-top:3px solid var(--amber)">'+
     '<div class="sec-hdr">'+
@@ -1011,9 +1026,13 @@ function renderTrackSection(trackId, items, officerCode, canE){
         '<td style="font-size:11px;color:var(--muted)">'+(esc(p.stageNote)||'&mdash;')+'</td>'+
         '<td style="font-size:11px;color:var(--muted)">'+(esc(p.remark)||'&mdash;')+'</td>'+
         (canE?'<td style="white-space:nowrap">'+
-          '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')">Edit</button> '+
-          (p.stage<maxStages?'<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')" title="Move to next stage">&#9654;</button> ':'<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; </span>')+
-          '<button class="btn btn-sm" style="background:#fef3e0;color:#d4820a;border-color:#f5d99a" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',true)" title="Mark as on hold">&#9646;&#9646;</button>'+
+          '<button class="btn btn-ghost btn-sm" onclick="openEdit(\''+p.id+'\',\''+trackId+'\')" >Edit</button> '+
+          (p.stage<maxStages
+            ? '<button class="btn btn-ghost btn-sm" onclick="quickAdvance(\''+p.id+'\',\''+trackId+'\')" title="Advance to next stage">&#9654; Next</button> '
+            : (TRACK_SEQUENCE[trackId]!==null
+               ? '<button class="btn btn-sm" style="background:#1a5fa8;color:#fff;border-color:#1248a0;font-weight:700" onclick="promoteToNextTrack(\''+p.id+'\',\''+trackId+'\')" title="Move to next track">'+TRACK_NEXT_LABEL[trackId]+'</button> '
+               : '<span style="font-size:10px;color:var(--green);font-weight:700">&#10003; Complete </span>'))+
+          '<button class="btn btn-sm" style="background:#fef3e0;color:#d4820a;border-color:#f5d99a" onclick="quickToggleHold(\''+p.id+'\',\''+trackId+'\',true)" title="Mark as on hold">&#9646;&#9646; Hold</button>'+
           '</td>':'')+
         '</tr>').join('')+
       '</tbody></table></div>';
@@ -1048,10 +1067,14 @@ function quickAdvance(id, type){
   const arr   = getDBArray(type);
   const track = TRACKS[type];
   const idx   = arr.findIndex(p=>p.id===id);
-  if(idx<0||arr[idx].stage>=track.stages.length) return;
-  arr[idx].stage++;
-  persistRow(arr[idx]);
-  toast('Advanced to: '+getStageLabel(type,arr[idx].stage));
+  if(idx<0) return;
+  const item = arr[idx];
+  if(item.stage < track.stages.length){
+    /* Normal within-track stage advance */
+    item.stage++;
+    persistRow(item);
+    toast('Advanced to: '+getStageLabel(type,item.stage));
+  }
   showPage(currentPage);
 }
 
@@ -1062,6 +1085,57 @@ function quickToggleHold(id, type, holdState){
   arr[idx].hold = holdState;
   persistRow(arr[idx]);
   toast(holdState ? 'Marked as on hold' : 'Hold removed — resumed');
+  showPage(currentPage);
+}
+
+/* ══════════════════════════════════════════
+   PROMOTE ACROSS TRACKS
+   Pipeline (BBL Signed) → E-File (E-File Creation)
+   E-File   (Approved)   → MoU    (Draft MoU)
+   ══════════════════════════════════════════ */
+const TRACK_SEQUENCE = { pipeline:'efile', efile:'mou', mou:null };
+const TRACK_NEXT_LABEL = {
+  pipeline:'Move to E-Files ▶',
+  efile:   'Move to MoU ▶',
+  mou:     null
+};
+
+function promoteToNextTrack(id, type){
+  const srcArr  = getDBArray(type);
+  const idx     = srcArr.findIndex(p=>p.id===id);
+  if(idx<0) return;
+  const srcItem = srcArr[idx];
+
+  const nextType = TRACK_SEQUENCE[type];
+  if(!nextType){ toast('This track is the final stage — no further promotion.',true); return; }
+
+  if(!confirm('Move "'+srcItem.project+'" to '+TRACKS[nextType].label+'?')) return;
+
+  /* Create the new entry in the next track at stage 1 */
+  const newItem = {
+    id:       genId(nextType[0]),
+    type:     nextType,
+    officer:  srcItem.officer,
+    project:  srcItem.project,
+    agency:   srcItem.agency,
+    ref:      srcItem.ref,
+    cost:     srcItem.cost,
+    apFlag:   srcItem.apFlag||'',
+    stage:    1,
+    stageNote:'',
+    hold:     false,
+    remark:   'Promoted from '+TRACKS[type].label
+  };
+
+  /* Add to local DB and persist */
+  getDBArray(nextType).push(newItem);
+  persistRow(newItem);
+
+  /* Mark original as completed (keep it for audit, just flag it) */
+  srcItem.remark = (srcItem.remark?srcItem.remark+' | ':'')+'Promoted to '+TRACKS[nextType].label;
+  persistRow(srcItem);
+
+  toast('Moved to '+TRACKS[nextType].label+' at stage 1 ✓');
   showPage(currentPage);
 }
 
