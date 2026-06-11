@@ -315,7 +315,7 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
            onkeydown="if(event.key==='Enter')doLogin()">
     <button class="btn-login" onclick="doLogin()">Sign in &rarr;</button>
     <div id="login-error"></div>
-    <div class="login-hint">Contact GM (CSR) office if you have forgotten your PIN.</div>
+    <div class="login-hint"></div>
   </div>
 </div>
 
@@ -471,9 +471,22 @@ let countdown    = REFRESH_SEC;
 let _missingTables = []; // tracks tables that returned 404/400
 
 /* ══════════════════════════════════════════
-   AUTH
+   AUTH — LOCAL PIN (no server required)
+   GM=0000, PP=1111, CK=2222, JAB=3333,
+   SSH=4444, UK=5555, PT=6666, RM=7777
    ══════════════════════════════════════════ */
-async function doLogin(){
+const LOCAL_PINS = {
+  GM:  '0000',
+  PP:  '1111',
+  CK:  '2222',
+  JAB: '3333',
+  SSH: '4444',
+  UK:  '5555',
+  PT:  '6666',
+  RM:  '7777'
+};
+
+function doLogin(){
   const code = document.getElementById('login-code').value;
   const pin  = document.getElementById('login-pin').value;
   const err  = document.getElementById('login-error');
@@ -481,36 +494,26 @@ async function doLogin(){
   if(!code){ err.textContent='Please select your officer code.'; return; }
   if(!pin)  { err.textContent='Please enter your PIN.'; return; }
   err.textContent='';
-  btn.textContent='Signing in…';
-  btn.disabled=true;
-  try{
-    const pinHash = await sha256hex(pin);
-    const rows    = await sbSelect('officers',
-      'code=eq.'+encodeURIComponent(code)+'&pin_hash=eq.'+encodeURIComponent(pinHash));
-    if(!rows||rows.length===0){ err.textContent='Incorrect officer code or PIN.'; return; }
-    const token   = randomHex(32);
-    const expires = new Date(Date.now()+TOKEN_TTL_MS).toISOString();
-    await sbInsert('sessions',{token, officer_code:code, expires_at:expires});
-    sessionToken = token; currentUser = code;
-    sessionStorage.setItem(TOKEN_KEY, JSON.stringify({token, user:code}));
-    document.getElementById('login-screen').style.display='none';
-    document.getElementById('app').style.display='block';
-    renderNavUser(); initApp();
-  }catch(e){
-    err.textContent='Cannot reach server. Check your connection.';
-    console.error(e);
-  }finally{ btn.textContent='Sign in →'; btn.disabled=false; }
+  if(LOCAL_PINS[code] === undefined || pin !== LOCAL_PINS[code]){
+    err.textContent='Incorrect officer code or PIN.';
+    return;
+  }
+  const token   = randomHex(32);
+  const expires = new Date(Date.now()+TOKEN_TTL_MS).toISOString();
+  sessionToken = token; currentUser = code;
+  sessionStorage.setItem(TOKEN_KEY, JSON.stringify({token, user:code, expires}));
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('app').style.display='block';
+  renderNavUser(); initApp();
 }
 
-async function tryRestoreSession(){
+function tryRestoreSession(){
   const saved = sessionStorage.getItem(TOKEN_KEY);
   if(!saved) return false;
   try{
-    const {token, user} = JSON.parse(saved);
-    const rows = await sbSelect('sessions',
-      'token=eq.'+encodeURIComponent(token)+'&expires_at=gt.'+new Date().toISOString());
-    if(rows && rows.length>0){
-      sessionToken = token; currentUser = rows[0].officer_code || user;
+    const {token, user, expires} = JSON.parse(saved);
+    if(expires && new Date(expires) > new Date()){
+      sessionToken = token; currentUser = user;
       document.getElementById('login-screen').style.display='none';
       document.getElementById('app').style.display='block';
       renderNavUser(); initApp(); return true;
@@ -521,9 +524,8 @@ async function tryRestoreSession(){
 
 function canEdit(officerCode){ return currentUser==='GM'||currentUser===officerCode; }
 
-async function logout(){
+function logout(){
   if(refreshTimer) clearInterval(refreshTimer);
-  try{ if(sessionToken) await sbDelete('sessions', sessionToken); }catch(e){}
   sessionToken=null; currentUser=null; currentPage='summary';
   sessionStorage.removeItem(TOKEN_KEY);
   document.getElementById('app').style.display='none';
