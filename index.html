@@ -48,7 +48,6 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .btn-login{width:100%;padding:13px;background:var(--coal);color:#fff;border:none;border-radius:var(--r);font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
 .btn-login:active{background:var(--coal-mid)}
 #login-error{color:var(--red);font-size:12px;text-align:center;margin-top:8px;min-height:18px}
-.login-hint{font-size:11px;color:var(--muted);text-align:center;margin-top:14px;line-height:1.6}
 
 /* ── APP SHELL ──────────────────────────────── */
 #app{display:none}
@@ -267,10 +266,10 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
 .rep-flag-cf {background:#fdf2f8;color:#7e22ce;border:1px solid #e9d5ff}
 .cf-row td   {background:#fdf6ff!important;}
 .cf-row:hover td{background:#f5eaff!important;}
-.mon-th-hr  {background:#dbeafe;color:#1d4ed8;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap}
-.mon-th-fin {background:#fef3c7;color:#92400e;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap}
-.mon-th-cmd {background:#fce7f3;color:#9d174d;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap}
-.mon-th-cf  {background:#ede9fe;color:#6d28d9;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap}
+.mon-th-hr  {background:#dbeafe;color:#1d4ed8;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap;display:inline-block}
+.mon-th-fin {background:#fef3c7;color:#92400e;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap;display:inline-block}
+.mon-th-cmd {background:#fce7f3;color:#9d174d;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap;display:inline-block}
+.mon-th-cf  {background:#ede9fe;color:#6d28d9;border-radius:6px;padding:3px 8px;font-size:10px;font-weight:700;white-space:nowrap;display:inline-block}
 .mon-stat-row{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px}
 @media(min-width:600px){.mon-stat-row{grid-template-columns:repeat(4,1fr)}}
 .mon-stat{border-radius:var(--r);padding:12px 14px;font-size:13px;font-weight:700;border:1px solid}
@@ -315,7 +314,6 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
            onkeydown="if(event.key==='Enter')doLogin()">
     <button class="btn-login" onclick="doLogin()">Sign in &rarr;</button>
     <div id="login-error"></div>
-
   </div>
 </div>
 
@@ -683,9 +681,7 @@ async function persistRow(item){
     const table = getTable(item.type);
     if(!table){ toast('Unknown record type.',true); return; }
 
-    /* Build row with only columns that exist in each table.
-       ap_flag only exists on pipeline_projects currently.
-       efile_projects and mou_projects need the SQL migration first. */
+    /* Full payload — includes columns added by v6 migration */
     const base = {
       id:item.id, officer:item.officer||'', project:item.project||'',
       agency:item.agency||'', ref:item.ref||'', cost:item.cost||'',
@@ -695,12 +691,49 @@ async function persistRow(item){
     if(item.type==='pipeline') base.ap_flag = item.apFlag||'';
 
     /* Use upsert (POST with merge-duplicates + return=minimal) */
-    const res = await sbFetch(table, {
+    let res = await sbFetch(table, {
       method:'POST',
       prefer:'resolution=merge-duplicates,return=minimal',
       body:JSON.stringify(base),
       rawRes:true
     });
+
+    /* ── SCHEMA-MISMATCH AUTO-RETRY ────────────────────────────
+       If Supabase returns 400 PGRST204 ("column not in schema cache"),
+       the database is on the old schema (missing hold/stage/stage_note/remark).
+       Retry with only the columns that have always existed.         */
+    if(res.status===400){
+      const txt = await res.text();
+      if(txt.includes('PGRST204')){
+        console.warn('Schema mismatch — retrying with minimal payload. Run migration SQL to fix permanently.');
+        if(!_missingTables.includes(table)) _missingTables.push(table);
+        /* Minimal payload: only columns present in all versions */
+        const minimal = {
+          id:item.id, officer:item.officer||'', project:item.project||'',
+          agency:item.agency||'', ref:item.ref||'', cost:item.cost||''
+        };
+        if(item.type==='pipeline') minimal.ap_flag = item.apFlag||'';
+        res = await sbFetch(table, {
+          method:'POST',
+          prefer:'resolution=merge-duplicates,return=minimal',
+          body:JSON.stringify(minimal),
+          rawRes:true
+        });
+        if(res.status===200||res.status===201||res.status===204){
+          const t = new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+          setSyncStatus('ok','Saved (partial — run migration SQL) &middot; '+t);
+          toast('⚠ Saved with limited fields. Run the migration SQL shown on the Summary page to enable all features.',false);
+          sbInsert('audit_log',{officer:currentUser,action:'SAVE_PARTIAL',rec_type:item.type,record_id:item.id,project:item.project||''}).catch(()=>{});
+          showPage('summary'); /* show the setup notice */
+          return;
+        }
+        /* If retry also failed, fall through to the error below */
+        const txt2 = await res.text().catch(()=>'');
+        throw new Error('HTTP '+res.status+': '+txt2);
+      }
+      throw new Error('HTTP 400: '+txt);
+    }
+
     if(res.status!==200&&res.status!==201&&res.status!==204){
       const txt = await res.text();
       throw new Error('HTTP '+res.status+': '+txt);
@@ -946,22 +979,32 @@ function renderSummary(){
     '</div>';
 }
 
-/* Shows Supabase SQL setup guidance when mou_projects table is missing (GM only) */
+/* Shows Supabase SQL setup guidance when a table is missing (GM only) */
 function renderDbSetupNotice(){
   if(currentUser!=='GM') return '';
   if(_missingTables.length===0) return '';
 
-  const sql = `-- Run in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
--- ─────────────────────────────────────────────────────
+  const sql = `-- ══════════════════════════════════════
+-- CCL CSR Monitor v9 — Migration SQL
+-- Run ONCE in Supabase SQL Editor
+-- ══════════════════════════════════════
+
 -- STEP 1: Add missing columns to efile_projects
+--   (fixes "HTTP 400 hold column" error on Move to E-Files)
 ALTER TABLE efile_projects
   ADD COLUMN IF NOT EXISTS stage      int4    DEFAULT 1,
   ADD COLUMN IF NOT EXISTS stage_note text    DEFAULT '',
   ADD COLUMN IF NOT EXISTS hold       boolean DEFAULT false,
   ADD COLUMN IF NOT EXISTS remark     text    DEFAULT '';
 
--- ─────────────────────────────────────────────────────
--- STEP 2: Create mou_projects table
+-- STEP 2: Add missing columns to mou_projects (if table exists)
+ALTER TABLE mou_projects
+  ADD COLUMN IF NOT EXISTS stage      int4    DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS stage_note text    DEFAULT '',
+  ADD COLUMN IF NOT EXISTS hold       boolean DEFAULT false,
+  ADD COLUMN IF NOT EXISTS remark     text    DEFAULT '';
+
+-- STEP 3: Create mou_projects table (if it doesn't exist)
 CREATE TABLE IF NOT EXISTS mou_projects (
   id         text PRIMARY KEY,
   officer    text    DEFAULT '',
@@ -981,8 +1024,7 @@ DO $$ BEGIN
   THEN CREATE POLICY anon_all ON mou_projects FOR ALL USING (true) WITH CHECK (true); END IF;
 END $$;
 
--- ─────────────────────────────────────────────────────
--- STEP 3: Create reporting_flags table
+-- STEP 4: Create reporting_flags table
 CREATE TABLE IF NOT EXISTS reporting_flags (
   project_id   text PRIMARY KEY,
   project_name text    DEFAULT '',
@@ -997,21 +1039,43 @@ ALTER TABLE reporting_flags ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='reporting_flags' AND policyname='anon_all')
   THEN CREATE POLICY anon_all ON reporting_flags FOR ALL USING (true) WITH CHECK (true); END IF;
+END $$;
+
+-- STEP 5: Create mon_proposals table (Proposal Monitoring Dashboard)
+CREATE TABLE IF NOT EXISTS mon_proposals (
+  id                 text        PRIMARY KEY,
+  sno                int4        DEFAULT 1,
+  project_name       text        DEFAULT '',
+  officer_name       text        DEFAULT '',
+  dir_hr             boolean     DEFAULT false,
+  dir_fin            boolean     DEFAULT false,
+  cmd                boolean     DEFAULT false,
+  critically_followed boolean    DEFAULT false,
+  updated_at         timestamptz DEFAULT now()
+);
+ALTER TABLE mon_proposals ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='mon_proposals' AND policyname='anon_all')
+  THEN CREATE POLICY anon_all ON mon_proposals FOR ALL USING (true) WITH CHECK (true); END IF;
 END $$;`;
 
   return '<div class="section" style="border-top:3px solid var(--amber)">'+
     '<div class="sec-hdr">'+
     '<span class="sec-title">&#9888; Database setup required</span>'+
-    '<span class="sec-sub">GM view only &mdash; missing: '+_missingTables.join(', ')+'</span>'+
+    '<span class="sec-sub">GM view only &mdash; missing tables/columns: '+_missingTables.join(', ')+'</span>'+
     '</div>'+
     '<div style="padding:14px">'+
+    '<p style="font-size:12px;color:#7a4a00;margin-bottom:6px;font-weight:600">'+
+    '&#128161; This fixes: "HTTP 400 hold column" errors, missing E-File / MoU / Reporting / Monitoring tables.'+
+    '</p>'+
     '<p style="font-size:12px;color:var(--muted);margin-bottom:10px">'+
-    'One or more database tables could not be reached (<strong>'+_missingTables.join(', ')+'</strong>). '+
-    'Copy and run the SQL below in your Supabase Dashboard → SQL Editor to create them:'+
+    'Copy and run <strong>all steps</strong> below in your Supabase Dashboard &rarr; SQL Editor &rarr; New Query:'+
     '</p>'+
     '<pre style="background:#1a1a2e;color:#e2e8f0;padding:14px;border-radius:var(--r);font-size:11px;overflow-x:auto;line-height:1.6;white-space:pre-wrap">'+esc(sql)+'</pre>'+
-    '<button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="navigator.clipboard&&navigator.clipboard.writeText('+JSON.stringify(sql)+').then(()=>toast(\'SQL copied to clipboard\'))">&#128203; Copy SQL</button>'+
-    '</div></div>';
+    '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">'+
+    '<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard&&navigator.clipboard.writeText('+JSON.stringify(sql)+').then(()=>toast(\'SQL copied to clipboard\'))">&#128203; Copy SQL</button>'+
+    '<a href="https://supabase.com/dashboard" target="_blank" class="btn btn-ghost btn-sm" style="text-decoration:none">&#128279; Open Supabase Dashboard</a>'+
+    '</div></div></div>';
 }
 
 function renderSummaryStageMatrix(){
@@ -1969,14 +2033,14 @@ function renderMonitoringPage(){
     '</div>'+
 
     /* Table */
-    '<div class="tw"><table class="rep-table"><thead><tr>'+
+    '<div class="tw"><table class="rep-table" style="table-layout:fixed;width:100%"><thead><tr>'+
     '<th style="width:44px;text-align:center">S.No.</th>'+
     '<th style="min-width:200px">Name of Project / Proposal</th>'+
-    '<th style="min-width:150px">Officer Dealing with the Case</th>'+
-    '<th style="text-align:center;min-width:90px"><span class="mon-th-hr">Director (HR)</span></th>'+
-    '<th style="text-align:center;min-width:100px"><span class="mon-th-fin">Director (Finance)</span></th>'+
-    '<th style="text-align:center;min-width:70px"><span class="mon-th-cmd">CMD</span></th>'+
-    '<th style="text-align:center;min-width:110px"><span class="mon-th-cf">Critically Followed</span></th>'+
+    '<th style="min-width:140px">Officer Dealing with the Case</th>'+
+    '<th style="width:100px;text-align:center"><span class="mon-th-hr">Director<br>(HR)</span></th>'+
+    '<th style="width:110px;text-align:center"><span class="mon-th-fin">Director<br>(Finance)</span></th>'+
+    '<th style="width:80px;text-align:center"><span class="mon-th-cmd">CMD</span></th>'+
+    '<th style="width:110px;text-align:center"><span class="mon-th-cf">Critically<br>Followed</span></th>'+
     '<th style="width:60px;text-align:center">Actions</th>'+
     '</tr></thead><tbody>';
 
@@ -2002,24 +2066,24 @@ function renderMonitoringPage(){
             : '<span style="color:var(--muted)">—</span>')+
         '</td>'+
         /* Dir (HR) checkbox */
-        '<td class="rep-cb-wrap">'+
+        '<td style="text-align:center;vertical-align:middle">'+
           '<input type="checkbox" class="mon-cb mon-cb-hr" data-id="'+p.id+'" data-field="dir_hr" '+(p.dir_hr?'checked':'')+
-          ' onchange="monCbChange(this)" title="Flag for Director (HR)">'+
+          ' onchange="monCbChange(this)" title="Flag for Director (HR)" style="width:18px;height:18px;cursor:pointer;accent-color:#1d4ed8">'+
         '</td>'+
         /* Dir (Finance) checkbox */
-        '<td class="rep-cb-wrap">'+
+        '<td style="text-align:center;vertical-align:middle">'+
           '<input type="checkbox" class="mon-cb mon-cb-fin" data-id="'+p.id+'" data-field="dir_fin" '+(p.dir_fin?'checked':'')+
-          ' onchange="monCbChange(this)" title="Flag for Director (Finance)">'+
+          ' onchange="monCbChange(this)" title="Flag for Director (Finance)" style="width:18px;height:18px;cursor:pointer;accent-color:#92400e">'+
         '</td>'+
         /* CMD checkbox */
-        '<td class="rep-cb-wrap">'+
+        '<td style="text-align:center;vertical-align:middle">'+
           '<input type="checkbox" class="mon-cb mon-cb-cmd" data-id="'+p.id+'" data-field="cmd" '+(p.cmd?'checked':'')+
-          ' onchange="monCbChange(this)" title="Flag for CMD">'+
+          ' onchange="monCbChange(this)" title="Flag for CMD" style="width:18px;height:18px;cursor:pointer;accent-color:#9d174d">'+
         '</td>'+
         /* Critically Followed checkbox */
-        '<td class="rep-cb-wrap">'+
+        '<td style="text-align:center;vertical-align:middle">'+
           '<input type="checkbox" class="mon-cb mon-cb-cf" data-id="'+p.id+'" data-field="critically_followed" '+(p.critically_followed?'checked':'')+
-          ' onchange="monCbChange(this)" title="Mark as Critically Followed">'+
+          ' onchange="monCbChange(this)" title="Mark as Critically Followed" style="width:18px;height:18px;cursor:pointer;accent-color:#6d28d9">'+
         '</td>'+
         /* Actions */
         '<td style="text-align:center">'+
