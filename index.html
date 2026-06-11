@@ -6,7 +6,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>CCL CSR Monitor v13</title>
+<title>CCL CSR Monitor v14</title>
 <style>
 :root{
   --coal:#1a1a2e;--coal-mid:#2d2d44;--coal-light:#3d3d5c;
@@ -220,7 +220,7 @@ td.cost{text-align:right;font-size:11px;white-space:nowrap}
 .toast.err{background:var(--red)}
 
 /* ── SAVING OVERLAY ──────────────────────────── */
-.saving-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.15);z-index:250;align-items:center;justify-content:center}
+.saving-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:250;align-items:center;justify-content:center;pointer-events:all;}
 .saving-overlay.show{display:flex}
 .saving-box{background:var(--white);border-radius:var(--rl);padding:20px 30px;font-size:14px;font-weight:600;color:var(--coal);box-shadow:var(--shadow-md);display:flex;align-items:center;gap:12px}
 .spinner{width:18px;height:18px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0}
@@ -316,6 +316,10 @@ const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsIn
 const TOKEN_KEY    = 'ccl_tok';
 const REFRESH_SEC  = 60;
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+
+/* Global locks to absolutely prevent double clicking bugs */
+window._isTransferring = false;
+window._isDeleting     = false;
 
 /* ── Supabase REST helpers ──────────────────────────────────── */
 async function sbFetch(path, opts = {}) {
@@ -643,6 +647,7 @@ async function removeRow(id, type){
     setSyncStatus('ok','Deleted &middot; '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
   }catch(e){
     toast('Could not delete: '+e.message,true);
+    throw e; // IMPORTANT: Let caller know it failed
   }finally{ showSaving(false); }
 }
 
@@ -928,8 +933,10 @@ function quickToggleHold(id, type, holdState){
 const TRACK_SEQUENCE = { pipeline:'efile', efile:'mou', mou:null };
 const TRACK_NEXT_LABEL = { pipeline:'Move to E-Files ▶', efile:'Move to MoU ▶', mou:null };
 
-/* ════ MOVEMENT LOGIC OVERHAUL ════ */
+/* ════ LOCKED MOVEMENT LOGIC (Fixes the Multi-Copy & Retain Bugs) ════ */
 async function promoteToNextTrack(id, type){
+  if(window._isTransferring) return; // IRONCLAD LOCK against multi-clicks
+
   const srcArr  = getDBArray(type);
   const idx     = srcArr.findIndex(p=>p.id===id);
   if(idx<0) return;
@@ -938,14 +945,15 @@ async function promoteToNextTrack(id, type){
   const nextTypeStr = TRACK_SEQUENCE[type];
   if(!nextTypeStr){ toast('This track is the final stage — no further promotion.',true); return; }
   
-  // Standard Confirmation
   if(!confirm('Move "'+srcItem.project+'" to '+TRACKS[nextTypeStr].label+'? This will completely transfer it out of the current track.')) return;
 
-  // New Popup specifically for E-File Number punch-in
   let efilePromptVal = '';
   if (nextTypeStr === 'efile') {
       efilePromptVal = prompt('Enter E-office/E-file number for this project (leave blank if none):', '') || '';
   }
+
+  window._isTransferring = true; // Lock engaged
+  showSaving(true, 'Transferring securely...');
 
   const newId = genId(nextTypeStr[0]);
   const newItem = {
@@ -964,37 +972,42 @@ async function promoteToNextTrack(id, type){
     efileNo:  efilePromptVal
   };
 
-  showSaving(true, 'Transferring...');
+  try {
+    // 1. Create in new track using the existing robust save
+    getDBArray(nextTypeStr).push(newItem); 
+    await persistRow(newItem); 
 
-  // 1. Create in new track
-  getDBArray(nextTypeStr).push(newItem);
-  await persistRow(newItem);
+    // 2. Transfer reporting flags 
+    if(DB.reportFlags[srcItem.id]){
+      const oldFlag = DB.reportFlags[srcItem.id];
+      DB.reportFlags[newId] = {
+        project_id:    newId,
+        project_name:  newItem.project,
+        officer:       newItem.officer,
+        track:         nextTypeStr,
+        dir_hr:        oldFlag.dir_hr,
+        dir_fin:       oldFlag.dir_fin,
+        cmd:           oldFlag.cmd,
+        most_followed: oldFlag.most_followed
+      };
+      await saveFlag(newId);
+      await sbFetch('reporting_flags?project_id=eq.'+encodeURIComponent(srcItem.id), {method:'DELETE', rawRes:true});
+      delete DB.reportFlags[srcItem.id];
+    }
 
-  // 2. Transfer reporting flags to the new ID so it doesn't drop off the GM radar
-  if(DB.reportFlags[srcItem.id]){
-    const oldFlag = DB.reportFlags[srcItem.id];
-    DB.reportFlags[newId] = {
-      project_id:    newId,
-      project_name:  newItem.project,
-      officer:       newItem.officer,
-      track:         nextTypeStr,
-      dir_hr:        oldFlag.dir_hr,
-      dir_fin:       oldFlag.dir_fin,
-      cmd:           oldFlag.cmd,
-      most_followed: oldFlag.most_followed
-    };
-    await saveFlag(newId);
-    // Delete old flag safely
-    await sbFetch('reporting_flags?project_id=eq.'+encodeURIComponent(srcItem.id), {method:'DELETE', rawRes:true});
-    delete DB.reportFlags[srcItem.id];
+    // 3. SECURELY DELETE FROM OLD TRACK
+    await removeRow(srcItem.id, type); 
+    
+    toast('Moved to '+TRACKS[nextTypeStr].label+' ✓');
+  } catch(e) {
+    console.error("Transfer error:", e);
+    toast("Database sync issue. Reloading...", true);
+    await loadData(true); // Force re-sync if something broke halfway
+  } finally {
+    window._isTransferring = false; // Release lock
+    showSaving(false);
+    showPage(currentPage);
   }
-
-  // 3. Delete completely from the old track (Resolves the duplicate visible issue)
-  await removeRow(srcItem.id, type); 
-
-  showSaving(false);
-  toast('Moved to '+TRACKS[nextTypeStr].label+' ✓');
-  showPage(currentPage);
 }
 
 /* ══════════════════════════════════════════
@@ -1013,16 +1026,16 @@ function openAdd(defOfficer, trackId){
     OFFICERS.map(o=>'<option value="'+o.code+'"'+(o.code===(defOfficer||currentUser)?' selected':'')+'>'+o.code+' — '+o.name+'</option>').join('')+
     '<option value="">Unassigned</option></select></div></div>'+
     '<div class="fg"><label>Project name *</label><input type="text" id="m-project" placeholder="Full project name"></div>'+
-    '<div class="frow"><div class="fg"><label>Agency</label><input type="text" id="m-agency"></div><div class="fg"><label>Reference</label><input type="text" id="m-ref"></div></div>'+
+    '<div class="frow"><div class="fg"><label>Agency / Implementing body</label><input type="text" id="m-agency"></div><div class="fg"><label>Reference (MP / DC / MoC)</label><input type="text" id="m-ref"></div></div>'+
     '<div class="frow"><div class="fg"><label>Cost (&#8377; Lakhs)</label><input type="number" id="m-cost" step="0.01"></div><div class="fg"><label>AP / Non-AP</label><select id="m-apflag"><option value="">—</option><option value="AP">AP</option><option value="Non-AP">Non-AP</option></select></div></div>'+
     
     // NEW FIELD FOR E-FILES ONLY
     '<div class="fg efile-only" '+(trackId==='efile'?'':'style="display:none"')+'>'+
     '<label>E-file Number</label><input type="text" id="m-efile-no" placeholder="E-office / E-file number"></div>'+
     
-    '<div class="frow"><div class="fg"><label>Stage</label><select id="m-stage">'+track.stages.map(s=>'<option value="'+s.id+'">'+s.id+'. '+s.label+'</option>').join('')+'</select></div><div class="fg"><label>Stage note</label><input type="text" id="m-snote"></div></div>'+
+    '<div class="frow"><div class="fg"><label>Stage</label><select id="m-stage">'+track.stages.map(s=>'<option value="'+s.id+'">'+s.id+'. '+s.label+'</option>').join('')+'</select></div><div class="fg"><label>Stage note</label><input type="text" id="m-snote" placeholder="Optional note"></div></div>'+
     '<div class="fg"><label>On hold?</label><div class="toggle-row"><label class="toggle"><input type="checkbox" id="m-hold"><span class="tslider"></span></label><span>Mark as on hold</span></div></div>'+
-    '<div class="fg"><label>Remarks</label><textarea id="m-remark"></textarea></div>'+
+    '<div class="fg"><label>Remarks</label><textarea id="m-remark" placeholder="Notes, queries, hold reasons…"></textarea></div>'+
     '<div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-acc" onclick="saveNew()">Save</button></div>';
   document.getElementById('modal-bg').classList.add('open');
 }
@@ -1034,7 +1047,6 @@ function switchTrackInModal(trackId, defOfficer){
   const tag = document.querySelector('.modal-track-tag');
   if(tag){ tag.className = 'modal-track-tag modal-track-'+trackId; tag.innerHTML = track.icon+' '+track.label; }
   
-  // Toggle E-file Number visibility dynamically
   const efNodes = document.querySelectorAll('.efile-only');
   efNodes.forEach(n => n.style.display = (trackId==='efile') ? 'block' : 'none');
 }
@@ -1114,9 +1126,16 @@ function saveEdit(id, type){
 }
 
 async function delItem(id, type){
+  if(window._isDeleting) return; // Lock against multi-clicks
   if(!confirm('Delete this entry permanently?')) return;
-  await removeRow(id, type);
-  closeModal(); toast('Entry deleted'); showPage(currentPage);
+  
+  window._isDeleting = true;
+  try {
+     await removeRow(id, type);
+     closeModal(); toast('Entry deleted'); showPage(currentPage);
+  } finally {
+     window._isDeleting = false;
+  }
 }
 
 function closeModal(){ document.getElementById('modal-bg').classList.remove('open'); }
