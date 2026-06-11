@@ -422,6 +422,7 @@ let currentPage  = 'summary';
 let DB           = { pipeline: [], efiles: [], mous: [] };
 let refreshTimer = null;
 let countdown    = REFRESH_SEC;
+let _missingTables = []; // tracks tables that returned 404/400
 
 /* ══════════════════════════════════════════
    AUTH
@@ -823,7 +824,7 @@ function renderSummary(){
     '<p>CCL &middot; FY 2026-27 &middot; '+new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})+'</p></div>'+
     '<div class="page-header-actions">'+
     (currentUser==='GM'?'<button class="btn btn-acc" onclick="openAdd(\'\',\'pipeline\')">+ Add</button>':'')+
-    '<button class="btn btn-ghost" onclick="exportAllXLSX()" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" title="Download all data as Excel">&#8595; XLS All</button>'+
+    '<button class="btn" onclick="exportAllXLSX()" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700" title="Download all data as Excel">&#8681; Excel All</button>'+
     '<button class="btn btn-ghost" onclick="initApp()" title="Refresh data">&#8635; Refresh</button></div></div>'+
 
     '<div class="stats-row">'+
@@ -866,8 +867,6 @@ function renderSummary(){
 }
 
 /* Shows Supabase SQL setup guidance when mou_projects table is missing (GM only) */
-let _missingTables = []; // populated by loadData
-
 function renderDbSetupNotice(){
   if(currentUser!=='GM') return '';
   if(_missingTables.length===0) return '';
@@ -952,7 +951,7 @@ function renderOfficerPage(code){
     '<div><h1>'+officer.name+'</h1>'+
     '<p>'+(canE?'<strong style="color:var(--green)">Edit access</strong>':'<span style="color:var(--muted)">View only</span>')+' &middot; FY 2026-27</p></div></div>'+
     '<div class="page-header-actions">'+
-    '<button class="btn btn-ghost" onclick="exportOfficerXLSX(\''+code+'\')" style="background:#e8f5e9;color:#2d7d46;border-color:#a5d6a7" title="Download this officer\'s data as Excel">&#8595; XLS</button>'+
+    '<button class="btn" onclick="exportOfficerXLSX(\''+code+'\')" style="background:#1e7e34;color:#fff;border-color:#155d27;font-weight:700" title="Download officer data as Excel">&#8681; Excel</button>'+
     '<button class="btn btn-ghost" onclick="initApp()" title="Refresh data">&#8635; Refresh</button>'+
     '</div></div>'+
 
@@ -1270,10 +1269,11 @@ function closeMBg(e){ if(e.target===document.getElementById('modal-bg')) closeMo
    ══════════════════════════════════════════ */
 function withXLSX(cb){
   if(window.XLSX){ cb(window.XLSX); return; }
+  toast('Preparing Excel export…');
   const s=document.createElement('script');
   s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
   s.onload=()=>cb(window.XLSX);
-  s.onerror=()=>toast('Could not load Excel library.',true);
+  s.onerror=()=>toast('Could not load Excel library. Check your connection.',true);
   document.head.appendChild(s);
 }
 
